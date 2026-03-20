@@ -1,0 +1,9 @@
+.env
+agent_*body*.json
+suite_run_body.json
+data/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
