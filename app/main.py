@@ -8,6 +8,9 @@ from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 
+from app.api.mock_routes import mock_mapped_server_router
+from app.api.mock_routes import mock_server_router
+from app.api.mock_routes import router as mock_router
 from app.api.routes import router
 from app.api.schemas import ErrorBody
 from app.config import get_settings
@@ -27,6 +30,8 @@ err_log = logging.getLogger("app.errors")
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # 清除 settings 缓存，确保 .env 变更在 uvicorn reload 时生效
+    get_settings.cache_clear()
     # uvicorn 可能在 load 时 dictConfig，再强制一遍级别，保证 Postman/任意客户端请求必进 root.log
     setup_file_logging(get_settings())
     apply_forced_log_levels(get_settings())
@@ -152,6 +157,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 
 app.include_router(router, prefix="/api/v1")
+app.include_router(mock_router, prefix="/api/v1")
+app.include_router(mock_server_router)
+app.include_router(mock_mapped_server_router)
 
 
 @app.get("/health")

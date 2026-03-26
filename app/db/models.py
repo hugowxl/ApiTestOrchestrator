@@ -134,6 +134,11 @@ class Endpoint(Base):
         nullable=False,
     )
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # 测试设计者对「当前接口」的补充说明，生成用例时以高优先级注入 LLM（与 OpenAPI 冲突时仍以契约为准）
+    test_design_notes: Mapped[str | None] = mapped_column(
+        Text().with_variant(LONGTEXT(), "mysql").with_variant(LONGTEXT(), "mariadb"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -235,3 +240,102 @@ class Report(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     run: Mapped["TestRun"] = relationship(back_populates="reports")
+
+
+# ---------------------------------------------------------------------------
+#  Mock 数据平台
+# ---------------------------------------------------------------------------
+
+
+class MockScenario(Base):
+    """Mock 业务场景：如"购买理财产品"，包含多张数据表和 API 规则。"""
+
+    __tablename__ = "mock_scenario"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    tables: Mapped[list["MockDataTable"]] = relationship(back_populates="scenario", cascade="all, delete-orphan")
+    api_rules: Mapped[list["MockApiRule"]] = relationship(back_populates="scenario", cascade="all, delete-orphan")
+
+
+class MockDataTable(Base):
+    """Mock 数据表：schema_json 描述列定义，rows_json 存储实际数据行。"""
+
+    __tablename__ = "mock_data_table"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    scenario_id: Mapped[str] = mapped_column(String(36), ForeignKey("mock_scenario.id"), nullable=False, index=True)
+    table_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    schema_json: Mapped[list] = mapped_column(JSONType, nullable=False, default=list)
+    rows_json: Mapped[list] = mapped_column(JSONType, nullable=False, default=list)
+    # reset 快照：用于在 Mock 运行时（通过 mock-server CRUD 或外部 state 更新）发生数据变更后恢复原始版本
+    reset_rows_json: Mapped[list] = mapped_column(JSONType, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    scenario: Mapped["MockScenario"] = relationship(back_populates="tables")
+    api_rules: Mapped[list["MockApiRule"]] = relationship(back_populates="table")
+
+
+class MockDataTableRuntimeState(Base):
+    """Mock 运行时覆盖层（overlay）。
+
+    约束：用于测试时的增删改查，避免直接修改 `MockDataTable.rows_json`（设计侧基准数据）。
+    """
+
+    __tablename__ = "mock_data_table_runtime_state"
+
+    table_id: Mapped[str] = mapped_column(String(36), ForeignKey("mock_data_table.id"), primary_key=True)
+    # 运行时 rows_json：当存在该行时，mock-server CRUD 读写/响应以此为准
+    rows_json: Mapped[list] = mapped_column(JSONType, nullable=False, default=list)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    table: Mapped["MockDataTable"] = relationship()
+
+
+class MockApiRule(Base):
+    """Mock API 规则：将 HTTP 请求映射到数据表的 CRUD 操作。"""
+
+    __tablename__ = "mock_api_rule"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    scenario_id: Mapped[str] = mapped_column(String(36), ForeignKey("mock_scenario.id"), nullable=False, index=True)
+    table_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("mock_data_table.id"), nullable=True, index=True)
+    method: Mapped[str] = mapped_column(String(16), nullable=False)
+    path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    key_field: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    response_template_json: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    scenario: Mapped["MockScenario"] = relationship(back_populates="api_rules")
+    table: Mapped["MockDataTable | None"] = relationship(back_populates="api_rules")
+
+
+class MockEndpointMapping(Base):
+    """Endpoint mapping：把 mock 运行时数据映射到类似生产环境的外部 URL。
+
+    约束：读写都作用在运行时 overlay（MockDataTableRuntimeState），不覆盖设计侧基准 rows_json。
+    """
+
+    __tablename__ = "mock_endpoint_mapping"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    scenario_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("mock_scenario.id"), nullable=False, index=True
+    )
+    method: Mapped[str] = mapped_column(String(16), nullable=False)
+    path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    table_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("mock_data_table.id"), nullable=True, index=True)
+    key_field: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    required_body_fields: Mapped[list] = mapped_column(JSONType, nullable=False, default=list)
+    response_template_json: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

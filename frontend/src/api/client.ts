@@ -79,6 +79,8 @@ export type EndpointRow = {
   path: string;
   operation_id: string | null;
   fingerprint: string;
+  /** 测试设计者对当前接口的补充说明，生成用例时高优先级注入 LLM */
+  test_design_notes?: string | null;
 };
 
 export type SuiteOut = {
@@ -88,6 +90,24 @@ export type SuiteOut = {
   name: string;
   snapshot_id: string | null;
   created_at?: string | null;
+};
+
+/** 场景 path-NNN 在用例 name 中的覆盖统计 */
+export type ScenarioPathCoverageOut = {
+  enabled: boolean;
+  expected_paths: string[];
+  covered_paths: string[];
+  missing_paths: string[];
+  total_cartesian_combinations: number;
+  expanded_paths_count: number;
+  truncated: boolean;
+  coverage_ratio: number;
+  path_labels: Record<string, string>;
+};
+
+export type GenerateCasesOut = {
+  suite: SuiteOut;
+  path_coverage: ScenarioPathCoverageOut;
 };
 
 export type TestCaseOut = {
@@ -140,6 +160,7 @@ export type GenerateCasesBatchOut = {
   succeeded: number;
   failed: number;
   suites: SuiteOut[];
+  path_coverages: ScenarioPathCoverageOut[];
   failures: { endpoint_id: string; code: string; message: string }[];
 };
 
@@ -150,6 +171,237 @@ export type RunSuitesBatchOut = {
   runs: TestRunOut[];
   skipped: { suite_id: string; reason: string }[];
 };
+
+// ---------------------------------------------------------------------------
+//  Mock 数据平台
+// ---------------------------------------------------------------------------
+
+export type ColumnDef = {
+  name: string;
+  type: string;
+  description?: string | null;
+};
+
+export type MockDataTableOut = {
+  id: string;
+  scenario_id: string;
+  table_name: string;
+  description: string | null;
+  schema_json: ColumnDef[];
+  rows_json: Record<string, unknown>[];
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type MockApiRuleOut = {
+  id: string;
+  scenario_id: string;
+  table_id: string | null;
+  method: string;
+  path: string;
+  description: string | null;
+  action: string;
+  key_field: string | null;
+  response_template_json: Record<string, unknown> | null;
+  created_at?: string | null;
+};
+
+export type MockScenarioOut = {
+  id: string;
+  name: string;
+  description: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type MockScenarioDetailOut = MockScenarioOut & {
+  tables: MockDataTableOut[];
+  api_rules: MockApiRuleOut[];
+};
+
+export type MockLLMGenerateOut = {
+  scenario: MockScenarioOut;
+  tables_created: number;
+  rules_created: number;
+};
+
+export type MockScenarioResetOut = {
+  scenario_id: string;
+  reset_tables: number;
+};
+
+export type MockTableStateUpdate = {
+  table_id?: string | null;
+  table_name?: string | null;
+  rows_json: unknown[];
+};
+
+export type MockEndpointMappingOut = {
+  id: string;
+  scenario_id: string;
+  method: string;
+  path: string;
+  action: string;
+  table_id: string | null;
+  key_field: string | null;
+  required_body_fields: string[];
+  response_template_json: Record<string, unknown> | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export const listMockScenarios = () =>
+  api<MockScenarioOut[]>("/api/v1/mock/scenarios");
+
+export const createMockScenario = (body: { name: string; description?: string | null }) =>
+  api<MockScenarioOut>("/api/v1/mock/scenarios", { method: "POST", body: JSON.stringify(body) });
+
+export const getMockScenario = (id: string) =>
+  api<MockScenarioDetailOut>(`/api/v1/mock/scenarios/${id}`);
+
+export const deleteMockScenario = (id: string) =>
+  api<void>(`/api/v1/mock/scenarios/${id}`, { method: "DELETE" });
+
+export const createMockTable = (
+  scenarioId: string,
+  body: {
+    table_name: string;
+    description?: string | null;
+    schema_json?: ColumnDef[];
+    rows_json?: Record<string, unknown>[];
+  },
+) =>
+  api<MockDataTableOut>(`/api/v1/mock/scenarios/${scenarioId}/tables`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const updateMockTable = (
+  tableId: string,
+  body: {
+    table_name?: string;
+    description?: string | null;
+    schema_json?: ColumnDef[];
+    rows_json?: Record<string, unknown>[];
+  },
+) =>
+  api<MockDataTableOut>(`/api/v1/mock/tables/${tableId}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+
+export const deleteMockTable = (tableId: string) =>
+  api<void>(`/api/v1/mock/tables/${tableId}`, { method: "DELETE" });
+
+export const createMockRule = (
+  scenarioId: string,
+  body: {
+    table_id?: string | null;
+    method: string;
+    path: string;
+    description?: string | null;
+    action: string;
+    key_field?: string | null;
+    response_template_json?: Record<string, unknown> | null;
+  },
+) =>
+  api<MockApiRuleOut>(`/api/v1/mock/scenarios/${scenarioId}/rules`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const updateMockRule = (
+  ruleId: string,
+  body: {
+    table_id?: string | null;
+    method?: string;
+    path?: string;
+    description?: string | null;
+    action?: string;
+    key_field?: string | null;
+  },
+) =>
+  api<MockApiRuleOut>(`/api/v1/mock/rules/${ruleId}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+
+export const deleteMockRule = (ruleId: string) =>
+  api<void>(`/api/v1/mock/rules/${ruleId}`, { method: "DELETE" });
+
+export const llmGenerateMockScenario = (body: {
+  business_description: string;
+  table_count_hint?: number;
+  rows_per_table_hint?: number;
+}) =>
+  api<MockLLMGenerateOut>("/api/v1/mock/scenarios/generate", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+// ---------------------------------------------------------------------------
+//  Mock 运行时数据：state / reset
+// ---------------------------------------------------------------------------
+
+export const resetMockScenario = (scenarioId: string) =>
+  api<MockScenarioResetOut>(`/api/v1/mock/scenarios/${scenarioId}/reset`, { method: "POST" });
+
+export const updateMockScenarioState = (
+  scenarioId: string,
+  body: { tables: MockTableStateUpdate[] },
+) => api<{
+  scenario_id: string;
+  updated_tables: MockDataTableOut[];
+}>(`/api/v1/mock/scenarios/${scenarioId}/state`, {
+  method: "PATCH",
+  body: JSON.stringify(body),
+});
+
+// ---------------------------------------------------------------------------
+//  Mock Endpoint Mapping（把运行时 Mock 映射到生产风格 URL）
+// ---------------------------------------------------------------------------
+
+export const listMockEndpointMappings = (scenarioId: string) =>
+  api<MockEndpointMappingOut[]>(`/api/v1/mock/scenarios/${scenarioId}/mappings`);
+
+export const createMockEndpointMapping = (
+  scenarioId: string,
+  body: {
+    method: string;
+    path: string;
+    action: string;
+    table_id?: string | null;
+    key_field?: string | null;
+    required_body_fields?: string[];
+    response_template_json?: Record<string, unknown> | null;
+  },
+) =>
+  api<MockEndpointMappingOut>(`/api/v1/mock/scenarios/${scenarioId}/mappings`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const updateMockEndpointMapping = (
+  mappingId: string,
+  body: {
+    method?: string | null;
+    path?: string | null;
+    action?: string | null;
+    table_id?: string | null;
+    key_field?: string | null;
+    required_body_fields?: string[] | null;
+    response_template_json?: Record<string, unknown> | null;
+  },
+) =>
+  api<MockEndpointMappingOut>(`/api/v1/mock/mappings/${mappingId}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+
+export const deleteMockEndpointMapping = (mappingId: string) =>
+  api<void>(`/api/v1/mock/mappings/${mappingId}`, { method: "DELETE" });
+
+// ---------------------------------------------------------------------------
 
 export const health = () => api<{ status: string }>("/health", undefined, { silent: true });
 
@@ -163,6 +415,12 @@ export const serviceStats = (serviceId: string) =>
 
 export const listEndpoints = (serviceId: string) =>
   api<EndpointRow[]>(`/api/v1/services/${serviceId}/endpoints`);
+
+export const patchEndpointNotes = (endpointId: string, body: { test_design_notes?: string | null }) =>
+  api<EndpointRow>(`/api/v1/endpoints/${endpointId}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
 
 export const listServiceSuites = (serviceId: string) =>
   api<SuiteOut[]>(`/api/v1/services/${serviceId}/suites`);
@@ -178,6 +436,11 @@ export const generateCasesBatch = (
     approve?: boolean;
     continue_on_error?: boolean;
     limit?: number | null;
+    /** 产品/业务说明，与 OpenAPI 一并传给 LLM */
+    business_context?: string | null;
+    /** 场景矩阵：key=变量，value=可选值数组 */
+    scenario_matrix?: Record<string, string[]> | null;
+    scenario_max_combinations?: number;
   },
 ) =>
   api<GenerateCasesBatchOut>(`/api/v1/services/${serviceId}/generate-cases-batch`, {
@@ -201,9 +464,15 @@ export const runSuitesBatch = (
 
 export const generateCasesForEndpoint = (
   endpointId: string,
-  body: { suite_name?: string | null; approve?: boolean } = {},
+  body: {
+    suite_name?: string | null;
+    approve?: boolean;
+    business_context?: string | null;
+    scenario_matrix?: Record<string, string[]> | null;
+    scenario_max_combinations?: number;
+  } = {},
 ) =>
-  api<SuiteOut>(`/api/v1/endpoints/${endpointId}/generate-cases`, {
+  api<GenerateCasesOut>(`/api/v1/endpoints/${endpointId}/generate-cases`, {
     method: "POST",
     body: JSON.stringify(body),
   });
