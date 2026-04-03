@@ -15,6 +15,7 @@ from app.db.models import (
     ConversationScenario,
     ConversationTurn,
     MockProfile,
+    MockBranchSkill,
 )
 from app.services.llm_client import LLMClient
 
@@ -24,10 +25,16 @@ SYSTEM_PROMPT = """\
 你是 AI Agent 测试分支设计专家。你的任务是根据用户描述的业务场景，分析出不同的业务执行路径，
 并为每条路径设计：(1) Mock 数据配置集 (2) 多轮对话测试用例。
 
-你需要覆盖以下三类 Mock 工作流数据：
+你需要覆盖以下四类 Mock 工作流数据：
 - wealth_recommend: 理财产品推荐（包含 bankCardNumber, productList 等）
 - balance_query: 余额查询（包含各卡尾号的余额，格式 card_XXXX_balance）
 - transfer: 转账（包含 default_status, default_amount, fail_cause 等）
+- wealth_purchase: 理财购买/申购（包含 default_product_code, default_product_name, default_amount,
+  default_purchase_status, fail_cause, default_confirmed_shares, order_id_prefix 等）
+
+其中：wealth_recommend 的 productList 可能包含多条产品，但 wealth_purchase 必须只选择其中一条进行购买。
+为保证“推荐-购买”上下关联，建议 wealth_purchase 额外包含：
+- selected_product_code 或 selected_product_name：其值必须来自 wealth_recommend.productList 中的某一条（优先 code）。
 
 每条分支的 profile_data 应包含上述工作流中与该分支相关的字段。
 
@@ -42,7 +49,8 @@ SYSTEM_PROMPT = """\
       "profile_data": {
         "wealth_recommend": { ... },
         "balance_query": { "card_1122_balance": 50000.0, ... },
-        "transfer": { "default_status": "成功", ... }
+        "transfer": { "default_status": "成功", ... },
+        "wealth_purchase": { "default_purchase_status": "成功", ... }
       },
       "conversation_turns": [
         {
@@ -63,6 +71,29 @@ SYSTEM_PROMPT = """\
 - 不同分支之间要覆盖不同的业务路径（如：正常/异常/边界）"""
 
 
+def ensure_default_mock_branch_skill(db: Session) -> MockBranchSkill:
+    """确保数据库里存在默认 Skill（用于一键生成测试分支）。"""
+    existing = (
+        db.query(MockBranchSkill)
+        .filter(MockBranchSkill.enabled == True)  # noqa: E712
+        .order_by(MockBranchSkill.created_at.desc())
+        .first()
+    )
+    if existing:
+        return existing
+
+    skill = MockBranchSkill(
+        name="默认 Mock 分支生成器",
+        description="使用内置 SYSTEM_PROMPT 生成 MockProfile（推荐/余额/转账/购买）。",
+        system_prompt=SYSTEM_PROMPT,
+        enabled=True,
+    )
+    db.add(skill)
+    db.commit()
+    db.refresh(skill)
+    return skill
+
+
 def generate_branches(
     db: Session,
     scenario: ConversationScenario,
@@ -70,6 +101,7 @@ def generate_branches(
     *,
     max_branches: int = 3,
     max_turns_per_branch: int = 5,
+    system_prompt: str | None = None,
 ) -> dict[str, Any]:
     """调用 LLM 生成多个 MockProfile + ConversationScenario 分支。
 
@@ -98,7 +130,8 @@ def generate_branches(
 - 分支之间的 profile_data 数据要有明确区分（如余额充足 vs 不足）
 - 每个分支的对话流程要符合该分支的 Mock 数据设定"""
 
-    raw = llm.chat_json(SYSTEM_PROMPT, user_prompt, use_json_object_mode=True)
+    prompt = system_prompt or SYSTEM_PROMPT
+    raw = llm.chat_json(prompt, user_prompt, use_json_object_mode=True)
     data = llm.parse_json_strict(raw)
     branches = data.get("branches", [])
 
@@ -118,6 +151,7 @@ def generate_branches(
             tags=["auto-branch", *(scenario.tags or [])],
             initial_context=scenario.initial_context,
             max_turns=max_turns_per_branch,
+            parent_scenario_id=scenario.id,
         )
         db.add(new_scenario)
         db.flush()

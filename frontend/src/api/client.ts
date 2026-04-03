@@ -447,6 +447,7 @@ export type ScenarioOut = {
   initial_context: Record<string, unknown> | null;
   max_turns: number;
   active_mock_profile_id: string | null;
+  parent_scenario_id: string | null;
   created_at?: string | null;
   updated_at?: string | null;
 };
@@ -850,10 +851,94 @@ export const deleteMockProfile = (profileId: string) =>
 export const activateMockProfile = (profileId: string) =>
   api<MockProfileOut>(`/api/v1/agent-test/mock-profiles/${profileId}/activate`, { method: "POST" });
 
+export type WorkflowMockPreviewCard = {
+  card_tail: string;
+  masked_number: string;
+  balance_cny: number;
+};
+
+export type WorkflowMockPreviewOut = {
+  profile_id: string;
+  wealth_recommend: {
+    bankCardNumber: string;
+    productList_raw: string;
+    products: Record<string, unknown>[];
+    node_name: string;
+  };
+  balance_query: {
+    cards: WorkflowMockPreviewCard[];
+    config: Record<string, unknown>;
+  };
+  transfer: {
+    default_amount: number;
+    default_status: string;
+    fail_cause: string;
+    node_name: string;
+    config: Record<string, unknown>;
+  };
+  wealth_purchase: {
+    default_product_code: string;
+    default_product_name: string;
+    default_amount: number;
+    default_purchase_status: string;
+    fail_cause: string;
+    default_confirmed_shares: number;
+    order_id_prefix: string;
+    node_name: string;
+    config: Record<string, unknown>;
+  };
+};
+
+export const getMockWorkflowPreview = (profileId: string, opts?: ApiRequestOptions) =>
+  api<WorkflowMockPreviewOut>(
+    `/api/v1/agent-test/mock-profiles/${profileId}/workflow-preview`,
+    undefined,
+    opts,
+  );
+
+export type MockBranchSkillOut = {
+  id: string;
+  name: string;
+  description: string | null;
+  system_prompt: string;
+  enabled: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export const listMockBranchSkills = () =>
+  api<MockBranchSkillOut[]>(`/api/v1/agent-test/mock-branch-skills`);
+
+export const createMockBranchSkill = (body: {
+  name: string;
+  description?: string | null;
+  system_prompt: string;
+  enabled?: boolean;
+}) =>
+  api<MockBranchSkillOut>(`/api/v1/agent-test/mock-branch-skills`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const updateMockBranchSkill = (skillId: string, body: {
+  name?: string | null;
+  description?: string | null;
+  system_prompt?: string | null;
+  enabled?: boolean | null;
+}) =>
+  api<MockBranchSkillOut>(`/api/v1/agent-test/mock-branch-skills/${skillId}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+
+export const deleteMockBranchSkill = (skillId: string) =>
+  api<void>(`/api/v1/agent-test/mock-branch-skills/${skillId}`, { method: "DELETE" });
+
 export const generateBranches = (scenarioId: string, body: {
   business_description: string;
   max_branches?: number;
   max_turns_per_branch?: number;
+  skill_id?: string | null;
 }) =>
   api<{ created_scenarios: number; created_profiles: number }>(
     `/api/v1/agent-test/scenarios/${scenarioId}/generate-branches`,

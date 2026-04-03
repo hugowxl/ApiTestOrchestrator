@@ -19,6 +19,7 @@ export default defineConfig(({ mode }) => {
   const proxy = {
     "/api": { target: backend, changeOrigin: true },
     "/mock-server": { target: backend, changeOrigin: true },
+    "/mock-workflow": { target: backend, changeOrigin: true },
     "/health": { target: backend, changeOrigin: true },
     "/docs": { target: backend, changeOrigin: true },
     "/openapi.json": { target: backend, changeOrigin: true },

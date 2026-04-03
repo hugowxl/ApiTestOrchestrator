@@ -33,17 +33,29 @@ export function AgentTestList() {
   const [scDesc, setScDesc] = useState("");
   const [scCreating, setScCreating] = useState(false);
 
-  /* LLM 生成场景 */
-  const [genDesc, setGenDesc] = useState("");
-  const [genTurns, setGenTurns] = useState(5);
-  const [genTargetId, setGenTargetId] = useState<string | null>(null);
-  const [generating, setGenerating] = useState(false);
+  /* LLM 一键生成测试分支（Mock） */
+  const [branchScenarioId, setBranchScenarioId] = useState("");
+  const [branchDesc, setBranchDesc] = useState("");
+  const [branchMax, setBranchMax] = useState(3);
+  const [branchTurns, setBranchTurns] = useState(5);
+  const [branchSkillId, setBranchSkillId] = useState<string | null>(null);
+  const [branchGenerating, setBranchGenerating] = useState(false);
+  const [branchSkills, setBranchSkills] = useState<api.MockBranchSkillOut[]>([]);
+  const [branchSkillsLoading, setBranchSkillsLoading] = useState(false);
+  const [branchResult, setBranchResult] = useState<{ created_scenarios: number; created_profiles: number } | null>(null);
 
   const load = () => {
     setLoading(true);
     api.listAgentTargets().then(setTargets).catch(() => {}).finally(() => setLoading(false));
   };
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    setBranchSkillsLoading(true);
+    api.listMockBranchSkills()
+      .then(setBranchSkills)
+      .catch(() => setBranchSkills([]))
+      .finally(() => setBranchSkillsLoading(false));
+  }, []);
 
   const handleCreateTarget = async () => {
     if (!name.trim() || !chatUrl.trim()) return;
@@ -76,6 +88,19 @@ export function AgentTestList() {
     try { await api.deleteAgentTarget(id); load(); } catch {}
   };
 
+  const handleDeleteScenario = async (targetId: string, scenarioId: string) => {
+    if (!confirm("确认删除该 Agent 测试场景？")) return;
+    try {
+      await api.deleteScenario(scenarioId);
+      const list = await api.listScenarios(targetId);
+      setScenarios(list);
+    } catch { /* handled */ }
+  };
+
+  const openMockProfiles = (scenarioId: string) => {
+    navigate(`/agent-test/scenarios/${scenarioId}?tab=mock-profiles`);
+  };
+
   const handleDiscover = async () => {
     if (!discoverUrl.trim()) return;
     setDiscovering(true);
@@ -102,7 +127,6 @@ export function AgentTestList() {
   const toggleExpand = async (id: string) => {
     if (expanded === id) { setExpanded(null); return; }
     setExpanded(id);
-    setGenTargetId(null);
     setScenariosLoading(true);
     try {
       const list = await api.listScenarios(id);
@@ -126,19 +150,52 @@ export function AgentTestList() {
     finally { setScCreating(false); }
   };
 
-  const handleGenerate = async (targetId: string) => {
-    if (!genDesc.trim()) return;
-    setGenerating(true);
+  const handleGenerateBranches = async () => {
+    if (!branchScenarioId || !branchDesc.trim()) return;
+    setBranchGenerating(true);
+    setBranchResult(null);
     try {
-      const sc = await api.generateScenario(targetId, {
-        business_description: genDesc.trim(),
-        max_turns: genTurns,
+      const res = await api.generateBranches(branchScenarioId, {
+        business_description: branchDesc.trim(),
+        max_branches: branchMax,
+        max_turns_per_branch: branchTurns,
+        skill_id: branchSkillId,
       });
-      setGenDesc("");
-      setGenTargetId(null);
-      navigate(`/agent-test/scenarios/${sc.id}`);
+      setBranchResult(res);
+      setBranchDesc("");
     } catch {}
-    finally { setGenerating(false); }
+    finally { setBranchGenerating(false); }
+  };
+
+  const buildScenarioRows = (list: api.ScenarioOut[]) => {
+    const byParent = new Map<string, api.ScenarioOut[]>();
+    const roots: api.ScenarioOut[] = [];
+    for (const s of list) {
+      const pid = s.parent_scenario_id;
+      if (!pid) {
+        roots.push(s);
+      } else {
+        const arr = byParent.get(pid) ?? [];
+        arr.push(s);
+        byParent.set(pid, arr);
+      }
+    }
+    roots.sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
+    for (const arr of byParent.values()) {
+      arr.sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
+    }
+    const rows: Array<{ s: api.ScenarioOut; level: number }> = [];
+    const pushTree = (node: api.ScenarioOut, level: number) => {
+      rows.push({ s: node, level });
+      const children = byParent.get(node.id) ?? [];
+      for (const c of children) pushTree(c, level + 1);
+    };
+    for (const r of roots) pushTree(r, 0);
+    // 兼容历史数据：parent 指向不存在的场景时，仍展示
+    const known = new Set(rows.map(x => x.s.id));
+    const dangling = list.filter(s => !known.has(s.id));
+    for (const d of dangling) rows.push({ s: d, level: 0 });
+    return rows;
   };
 
   return (
@@ -281,36 +338,65 @@ export function AgentTestList() {
                       <td colSpan={6} style={{ background: "var(--bg)", padding: "0.75rem 1rem" }}>
                         {/* AI 生成场景 */}
                         <div className="mock-form-section" style={{ marginBottom: "0.75rem" }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.35rem" }}>
-                            <strong style={{ fontSize: "0.85rem" }}>AI 自动生成测试场景</strong>
-                            {genTargetId !== t.id ? (
-                              <button className="btn secondary" style={{ fontSize: "0.75rem", padding: "0.2rem 0.5rem" }}
-                                onClick={() => setGenTargetId(t.id)}>展开</button>
-                            ) : (
-                              <button className="btn secondary" style={{ fontSize: "0.75rem", padding: "0.2rem 0.5rem" }}
-                                onClick={() => setGenTargetId(null)}>收起</button>
-                            )}
+                          <div style={{ marginBottom: "0.35rem" }}>
+                            <strong style={{ fontSize: "0.85rem" }}>LLM 一键生成测试分支（Mock）</strong>
                           </div>
-                          {genTargetId === t.id && (
-                            <>
-                              <label style={{ marginBottom: "0.35rem" }}>
-                                业务场景描述
-                                <textarea value={genDesc} onChange={e => setGenDesc(e.target.value)}
-                                  placeholder={"例如：测试理财Agent的基金推荐与购买完整流程\n1. 用户咨询理财产品\n2. 用户指定风险偏好后获得推荐\n3. 用户选择产品并购买"}
-                                  rows={3} />
-                              </label>
-                              <div className="row" style={{ alignItems: "flex-end" }}>
-                                <label>
-                                  对话轮数
-                                  <input type="number" min={2} max={20} value={genTurns}
-                                    onChange={e => setGenTurns(Number(e.target.value))} style={{ width: "5rem", minWidth: "auto" }} />
-                                </label>
-                                <button className="btn" disabled={generating || !genDesc.trim()} onClick={() => handleGenerate(t.id)}>
-                                  {generating ? "生成中…" : "AI 生成"}
-                                </button>
-                              </div>
-                              {generating && <p className="muted" style={{ margin: "0.5rem 0 0" }}>正在调用大模型生成测试场景…</p>}
-                            </>
+                          <label style={{ marginBottom: "0.35rem" }}>
+                            业务场景描述
+                            <textarea
+                              value={branchDesc}
+                              onChange={e => setBranchDesc(e.target.value)}
+                              placeholder={"例如：购买理财产品场景，推荐多只产品，仅选择其中一只购买；覆盖余额充足/不足/转账失败路径"}
+                              rows={3}
+                            />
+                          </label>
+                          <div className="row" style={{ alignItems: "flex-end", gap: "0.5rem", flexWrap: "wrap" }}>
+                            <label style={{ minWidth: "14rem" }}>
+                              选择场景
+                              <select value={branchScenarioId} onChange={e => setBranchScenarioId(e.target.value)}>
+                                <option value="">请选择场景</option>
+                                {buildScenarioRows(scenarios).map(({ s, level }) => (
+                                  <option key={s.id} value={s.id}>
+                                    {`${"　".repeat(level)}${level > 0 ? "└ " : ""}${s.name}`}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label style={{ minWidth: "12rem" }}>
+                              注入场景 Skill
+                              <select
+                                value={branchSkillId ?? ""}
+                                onChange={e => setBranchSkillId(e.target.value ? e.target.value : null)}
+                                disabled={branchSkillsLoading}
+                              >
+                                <option value="">默认（内置 SYSTEM_PROMPT）</option>
+                                {branchSkills.map(s => (
+                                  <option key={s.id} value={s.id} disabled={!s.enabled}>
+                                    {!s.enabled ? `禁用：${s.name}` : s.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label>
+                              分支数
+                              <input type="number" min={1} max={10} value={branchMax}
+                                onChange={e => setBranchMax(Math.max(1, Math.min(10, Number(e.target.value))))}
+                                style={{ width: "5rem", minWidth: "auto" }} />
+                            </label>
+                            <label>
+                              每分支最大轮次
+                              <input type="number" min={2} max={20} value={branchTurns}
+                                onChange={e => setBranchTurns(Math.max(2, Math.min(20, Number(e.target.value))))}
+                                style={{ width: "5rem", minWidth: "auto" }} />
+                            </label>
+                            <button className="btn" disabled={branchGenerating || !branchScenarioId || !branchDesc.trim()} onClick={handleGenerateBranches}>
+                              {branchGenerating ? "生成中…" : "生成分支"}
+                            </button>
+                          </div>
+                          {branchResult && (
+                            <p style={{ marginTop: "0.5rem", color: "var(--ok)" }}>
+                              已生成 {branchResult.created_scenarios} 个场景、{branchResult.created_profiles} 个 MockProfile。
+                            </p>
                           )}
                         </div>
 
@@ -337,12 +423,16 @@ export function AgentTestList() {
                         ) : (
                           <table style={{ fontSize: "0.8rem" }}>
                             <thead>
-                              <tr><th>场景名称</th><th>描述</th><th>标签</th><th>创建时间</th></tr>
+                              <tr><th>场景名称</th><th>描述</th><th>标签</th><th>创建时间</th><th>操作</th></tr>
                             </thead>
                             <tbody>
-                              {scenarios.map(s => (
+                              {buildScenarioRows(scenarios).map(({ s, level }) => (
                                 <tr key={s.id}>
-                                  <td><Link to={`/agent-test/scenarios/${s.id}`}>{s.name}</Link></td>
+                                  <td>
+                                    <Link to={`/agent-test/scenarios/${s.id}`}>
+                                      {`${"　".repeat(level)}${level > 0 ? "└ " : ""}${s.name}`}
+                                    </Link>
+                                  </td>
                                   <td className="muted" style={{ maxWidth: "16rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                                     {s.description || "—"}
                                   </td>
@@ -350,6 +440,22 @@ export function AgentTestList() {
                                     {s.tags?.map((tag, i) => <span key={i} className="badge" style={{ marginRight: "0.25rem" }}>{tag}</span>)}
                                   </td>
                                   <td className="mono muted">{s.created_at ? new Date(s.created_at).toLocaleString() : "—"}</td>
+                                  <td>
+                                    <button
+                                      className="btn secondary"
+                                      style={{ fontSize: "0.7rem", padding: "0.15rem 0.4rem", marginRight: "0.35rem" }}
+                                      onClick={() => openMockProfiles(s.id)}
+                                    >
+                                      Mock 配置
+                                    </button>
+                                    <button
+                                      className="btn secondary"
+                                      style={{ fontSize: "0.7rem", padding: "0.15rem 0.4rem", color: "var(--bad)" }}
+                                      onClick={() => handleDeleteScenario(t.id, s.id)}
+                                    >
+                                      删除
+                                    </button>
+                                  </td>
                                 </tr>
                               ))}
                             </tbody>

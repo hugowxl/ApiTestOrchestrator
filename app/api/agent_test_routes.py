@@ -24,6 +24,9 @@ from app.api.agent_test_schemas import (
     DiscoveredAgent,
     GenerateBranchesRequest,
     GenerateScenarioRequest,
+    MockBranchSkillOut,
+    MockBranchSkillCreate,
+    MockBranchSkillUpdate,
     MockProfileCreate,
     MockProfileOut,
     MockProfileUpdate,
@@ -40,11 +43,13 @@ from app.db.models import (
     AgentTestRunStatus,
     ConversationScenario,
     ConversationTurn,
+    MockBranchSkill,
     MockProfile,
     TurnResult,
 )
 from app.db.session import get_db
 from app.services.conversation_executor import ConversationExecutor
+from app.services.workflow_mock_server import compute_mock_preview
 from app.utils.errors import ErrorCode
 
 _log = logging.getLogger(__name__)
@@ -279,6 +284,12 @@ def execute_single_turn(turn_id: str, body: RunScenarioRequest, db: Session = De
         conversation_history.append({"role": "system", "content": target.default_system_prompt})
 
     session_id = f"single-{__import__('uuid').uuid4().hex[:12]}"
+    # 独立执行单轮时，不走 ConversationExecutor.run_scenario/run_scenario_streaming，
+    # 这里需要手动把 active_mock_profile_id 绑定到 mock-server 的 conversation_id，
+    # 让 Mock 服务读取 Mock 数据一览里激活的 profile 而不是硬编码默认值。
+    if scenario.active_mock_profile_id:
+        from app.services.workflow_mock_server import set_mock_profile_for_conversation
+        set_mock_profile_for_conversation(session_id, scenario.active_mock_profile_id)
 
     try:
         with httpx.Client(
@@ -888,6 +899,16 @@ def activate_mock_profile(profile_id: str, db: Session = Depends(get_db)):
     return mp
 
 
+@router.get("/agent-test/mock-profiles/{profile_id}/workflow-preview")
+def get_mock_workflow_preview(profile_id: str, db: Session = Depends(get_db)):
+    """工作流 Mock 合并后的理财/余额/转账/购买数据快照（供前端展示）。"""
+    mp = db.get(MockProfile, profile_id)
+    if not mp:
+        raise _E404("MockProfile 不存在")
+    data = compute_mock_preview(mp.profile_data or {})
+    return {"profile_id": profile_id, **data}
+
+
 def _deactivate_others(db: Session, scenario_id: str, *, exclude_id: str) -> None:
     others = db.scalars(
         select(MockProfile).where(
@@ -898,6 +919,75 @@ def _deactivate_others(db: Session, scenario_id: str, *, exclude_id: str) -> Non
     ).all()
     for o in others:
         o.is_active = False
+
+
+# ---------------------------------------------------------------------------
+#  Mock 分支生成器 Skills
+# ---------------------------------------------------------------------------
+
+
+@router.get("/agent-test/mock-branch-skills", response_model=list[MockBranchSkillOut])
+def list_mock_branch_skills(db: Session = Depends(get_db)):
+    """
+    返回用于 LLM 一键生成测试分支的可选 Skill（系统提示词）。
+    若数据库为空则自动创建默认 Skill。
+    """
+    from app.services.mock_branch_designer import ensure_default_mock_branch_skill
+
+    ensure_default_mock_branch_skill(db)
+    return (
+        db.scalars(select(MockBranchSkill).order_by(MockBranchSkill.created_at.desc())).all()
+    )
+
+
+@router.post("/agent-test/mock-branch-skills", response_model=MockBranchSkillOut)
+def create_mock_branch_skill(body: MockBranchSkillCreate, db: Session = Depends(get_db)):
+    """
+    创建一个用于 LLM 一键生成测试分支的系统提示词 Skill。
+    """
+    existing = db.query(MockBranchSkill).filter(MockBranchSkill.name == body.name).first()
+    if existing:
+        raise HTTPException(409, detail={"code": "DUPLICATE", "message": "Skill 名称已存在"})
+
+    skill = MockBranchSkill(
+        name=body.name.strip(),
+        description=body.description,
+        system_prompt=body.system_prompt,
+        enabled=bool(body.enabled),
+    )
+    db.add(skill)
+    db.commit()
+    db.refresh(skill)
+    return skill
+
+
+@router.put("/agent-test/mock-branch-skills/{skill_id}", response_model=MockBranchSkillOut)
+def update_mock_branch_skill(skill_id: str, body: MockBranchSkillUpdate, db: Session = Depends(get_db)):
+    skill = db.get(MockBranchSkill, skill_id)
+    if not skill:
+        raise _E404("Skill 不存在")
+
+    for field in ("name", "description", "system_prompt", "enabled"):
+        val = getattr(body, field, None)
+        # Pydantic 里未传的字段值为 None；这里直接用 val is not None 判断
+        if val is not None:
+            setattr(skill, field, val)
+
+    if body.name is not None:
+        skill.name = body.name.strip()
+
+    db.commit()
+    db.refresh(skill)
+    return skill
+
+
+@router.delete("/agent-test/mock-branch-skills/{skill_id}", status_code=204)
+def delete_mock_branch_skill(skill_id: str, db: Session = Depends(get_db)):
+    skill = db.get(MockBranchSkill, skill_id)
+    if not skill:
+        raise _E404("Skill 不存在")
+    db.delete(skill)
+    db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -912,16 +1002,27 @@ def generate_branches_endpoint(
     db: Session = Depends(get_db),
 ):
     from app.services.mock_branch_designer import generate_branches
+    from app.services.mock_branch_designer import ensure_default_mock_branch_skill
 
     sc = db.get(ConversationScenario, scenario_id)
     if not sc:
         raise _E404("场景不存在")
+
+    if body.skill_id:
+        skill = db.get(MockBranchSkill, body.skill_id)
+        if not skill or not skill.enabled:
+            raise _E404("Skill 不存在或已禁用")
+        system_prompt = skill.system_prompt
+    else:
+        system_prompt = ensure_default_mock_branch_skill(db).system_prompt
+
     try:
         result = generate_branches(
             db, sc,
             business_description=body.business_description,
             max_branches=body.max_branches,
             max_turns_per_branch=body.max_turns_per_branch,
+            system_prompt=system_prompt,
         )
     except Exception as e:
         raise HTTPException(502, detail={"code": "LLM_FAILED", "message": str(e)}) from e

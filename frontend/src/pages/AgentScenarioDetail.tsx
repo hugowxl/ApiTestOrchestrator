@@ -1,11 +1,13 @@
 import { useEffect, useState, useRef } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useLocation, useParams, Link, useNavigate } from "react-router-dom";
 import * as api from "../api/client";
 
 type Tab = "turns" | "runs" | "run-detail" | "mock-profiles";
 
 export function AgentScenarioDetail() {
   const { scenarioId } = useParams<{ scenarioId: string }>();
+  const navigate = useNavigate();
+  const location = useLocation();
   const [scenario, setScenario] = useState<api.ScenarioDetailOut | null>(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<Tab>("turns");
@@ -40,6 +42,16 @@ export function AgentScenarioDetail() {
     api.getScenario(scenarioId).then(setScenario).catch(() => {}).finally(() => setLoading(false));
   };
   useEffect(() => { load(); }, [scenarioId]);
+
+  // 支持从 URL 直接跳转到指定页签，例如：
+  // /agent-test/scenarios/{id}?tab=mock-profiles
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const t = params.get("tab");
+    if (!t) return;
+    const allow: Tab[] = ["turns", "runs", "run-detail", "mock-profiles"];
+    if (allow.includes(t as Tab)) setTab(t as Tab);
+  }, [location.search, scenarioId]);
 
   const loadRuns = () => {
     if (!scenarioId) return;
@@ -186,6 +198,15 @@ export function AgentScenarioDetail() {
     } catch {}
   };
 
+  const handleDeleteScenario = async () => {
+    if (!scenarioId) return;
+    if (!confirm("确认删除该 Agent 测试场景？")) return;
+    try {
+      await api.deleteScenario(scenarioId);
+      navigate("/agent-test");
+    } catch {}
+  };
+
   /* Mock Profiles */
   const [mockProfiles, setMockProfiles] = useState<api.MockProfileOut[]>([]);
   const [mockLoading, setMockLoading] = useState(false);
@@ -203,6 +224,9 @@ export function AgentScenarioDetail() {
   const [branchTurns, setBranchTurns] = useState(5);
   const [branchGenerating, setBranchGenerating] = useState(false);
   const [branchResult, setBranchResult] = useState<{ created_scenarios: number; created_profiles: number } | null>(null);
+  const [branchSkills, setBranchSkills] = useState<api.MockBranchSkillOut[]>([]);
+  const [branchSkillsLoading, setBranchSkillsLoading] = useState(false);
+  const [branchSkillId, setBranchSkillId] = useState<string | null>(null); // null = 默认 SYSTEM_PROMPT
 
   const loadMockProfiles = () => {
     if (!scenarioId) return;
@@ -211,6 +235,14 @@ export function AgentScenarioDetail() {
   };
   useEffect(() => { loadMockProfiles(); }, [scenarioId]);
   useEffect(() => { if (tab === "mock-profiles") loadMockProfiles(); }, [tab]);
+
+  useEffect(() => {
+    setBranchSkillsLoading(true);
+    api.listMockBranchSkills()
+      .then(setBranchSkills)
+      .catch(() => setBranchSkills([]))
+      .finally(() => setBranchSkillsLoading(false));
+  }, []);
 
   const handleCreateProfile = async () => {
     if (!scenarioId || !mpName.trim()) return;
@@ -272,6 +304,15 @@ export function AgentScenarioDetail() {
             {scenario.description && <p className="muted" style={{ margin: "0.25rem 0 0", fontSize: "0.85rem" }}>{scenario.description}</p>}
           </div>
           <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+            <button
+              className="btn secondary"
+              style={{ fontSize: "0.8rem", padding: "0.2rem 0.6rem", color: "var(--bad)" }}
+              onClick={handleDeleteScenario}
+              disabled={running}
+              title={running ? "执行中不可删除" : "删除场景"}
+            >
+              删除场景
+            </button>
             <span className="muted" style={{ fontSize: "0.8rem" }}>
               {scenario.turns.length} 轮对话
             </span>
@@ -521,7 +562,7 @@ export function AgentScenarioDetail() {
               Profile Data（JSON）
               <textarea value={mpJson} onChange={e => setMpJson(e.target.value)} rows={6}
                 style={{ fontFamily: "monospace", fontSize: "0.82rem" }}
-                placeholder='{"wealth_recommend": {...}, "balance_query": {...}, "transfer": {...}}' />
+                placeholder='{"wealth_recommend": {...}, "balance_query": {...}, "transfer": {...}, "wealth_purchase": {...}}' />
             </label>
             <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "0.5rem" }}>
               <button className="btn" disabled={mpSaving || !mpName.trim()} onClick={handleCreateProfile}>
@@ -543,6 +584,23 @@ export function AgentScenarioDetail() {
             </label>
             <div className="row" style={{ gap: "0.5rem", marginTop: "0.5rem", alignItems: "flex-end" }}>
               <label style={{ flex: 1 }}>
+                注入场景 Skill
+                <select
+                  value={branchSkillId ?? ""}
+                  onChange={e => setBranchSkillId(e.target.value ? e.target.value : null)}
+                  disabled={branchSkillsLoading}
+                >
+                  <option value="">默认（内置 SYSTEM_PROMPT）</option>
+                  {branchSkills.map(s => (
+                    <option key={s.id} value={s.id} disabled={!s.enabled}>
+                      {!s.enabled ? `禁用：${s.name}` : s.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="row" style={{ gap: "0.5rem", marginTop: "0.5rem", alignItems: "flex-end" }}>
+              <label style={{ flex: 1 }}>
                 分支数
                 <input type="number" value={branchMax} min={1} max={10}
                   onChange={e => setBranchMax(Math.max(1, Math.min(10, Number(e.target.value))))} />
@@ -561,6 +619,7 @@ export function AgentScenarioDetail() {
                     business_description: branchDesc,
                     max_branches: branchMax,
                     max_turns_per_branch: branchTurns,
+                    skill_id: branchSkillId,
                   });
                   setBranchResult(res);
                   loadMockProfiles();
@@ -637,7 +696,13 @@ export function AgentScenarioDetail() {
                           </div>
                         </div>
                       ) : (
-                        <CollapsibleJson label="Profile Data" data={p.profile_data} />
+                        <>
+                          <MockWorkflowPreviewPanel
+                            key={`mock-prev-${p.id}-${p.updated_at ?? ""}-${p.created_at ?? ""}`}
+                            profileId={p.id}
+                          />
+                          <CollapsibleJson label="Profile Data" data={p.profile_data} />
+                        </>
                       )}
                     </div>
                   );
@@ -660,6 +725,176 @@ function StatusBadge({ status }: { status: string }) {
     <span className="badge" style={{ color: colors[status] || "var(--muted)", borderColor: colors[status] }}>
       {status}
     </span>
+  );
+}
+
+function MockWorkflowPreviewPanel({ profileId }: { profileId: string }) {
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState<api.WorkflowMockPreviewOut | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    if (data) {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setErr(null);
+    api.getMockWorkflowPreview(profileId, { silent: true })
+      .then((d) => {
+        if (!cancelled) setData(d);
+      })
+      .catch((e: Error) => {
+        if (!cancelled) setErr(e.message || "加载失败");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, profileId, data]);
+
+  return (
+    <div style={{ marginTop: "0.45rem" }}>
+      <button
+        type="button"
+        className="btn secondary"
+        style={{ fontSize: "0.72rem", padding: "0.15rem 0.5rem" }}
+        onClick={() => setOpen((v) => !v)}
+      >
+        {open ? "▼" : "▶"} Mock 数据一览（推荐产品 · 卡余额 · 购买默认）
+      </button>
+      {open && loading && <p className="muted" style={{ fontSize: "0.8rem", margin: "0.35rem 0 0" }}>加载中…</p>}
+      {open && err && (
+        <p style={{ color: "var(--bad)", fontSize: "0.8rem", margin: "0.35rem 0 0" }}>{err}</p>
+      )}
+      {open && data && !loading && (
+        <div
+          style={{
+            marginTop: "0.45rem",
+            display: "grid",
+            gap: "0.65rem",
+            gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
+          }}
+        >
+          <div
+            style={{
+              background: "var(--bg)",
+              border: "1px solid var(--border)",
+              borderRadius: "6px",
+              padding: "0.5rem 0.6rem",
+              fontSize: "0.78rem",
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: "0.35rem" }}>推荐 / 筛选卡号</div>
+            <p className="muted" style={{ margin: "0 0 0.35rem" }}>
+              bankCardNumber: <span className="mono">{data.wealth_recommend.bankCardNumber}</span>
+            </p>
+            {data.wealth_recommend.products.length === 0 ? (
+              <p className="muted" style={{ margin: 0 }}>无解析后的产品行（请检查 productList 格式）</p>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.74rem" }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: "left", padding: "0.2rem" }}>代码</th>
+                      <th style={{ textAlign: "left", padding: "0.2rem" }}>名称</th>
+                      <th style={{ textAlign: "left", padding: "0.2rem" }}>收益</th>
+                      <th style={{ textAlign: "left", padding: "0.2rem" }}>风险</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.wealth_recommend.products.map((row, i) => (
+                      <tr key={i}>
+                        <td className="mono" style={{ padding: "0.2rem" }}>{String(row.productCode ?? "—")}</td>
+                        <td style={{ padding: "0.2rem" }}>{String(row.productName ?? "—")}</td>
+                        <td style={{ padding: "0.2rem" }}>{String(row.profitValue ?? row.profit ?? "—")}</td>
+                        <td style={{ padding: "0.2rem" }}>{String(row.riskLevel ?? "—")}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div
+            style={{
+              background: "var(--bg)",
+              border: "1px solid var(--border)",
+              borderRadius: "6px",
+              padding: "0.5rem 0.6rem",
+              fontSize: "0.78rem",
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: "0.35rem" }}>用户余额（Mock）</div>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.74rem" }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: "left", padding: "0.2rem" }}>卡号（掩码）</th>
+                    <th style={{ textAlign: "right", padding: "0.2rem" }}>CNY 余额</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.balance_query.cards.map((c) => (
+                    <tr key={c.card_tail}>
+                      <td className="mono" style={{ padding: "0.2rem" }}>{c.masked_number}</td>
+                      <td style={{ padding: "0.2rem", textAlign: "right" }}>
+                        {c.balance_cny.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div
+            style={{
+              background: "var(--bg)",
+              border: "1px solid var(--border)",
+              borderRadius: "6px",
+              padding: "0.5rem 0.6rem",
+              fontSize: "0.78rem",
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: "0.35rem" }}>理财购买默认</div>
+            <ul style={{ margin: 0, paddingLeft: "1.1rem", lineHeight: 1.55 }}>
+              <li>产品：{data.wealth_purchase.default_product_name}（{data.wealth_purchase.default_product_code}）</li>
+              <li>默认金额：{data.wealth_purchase.default_amount} 元</li>
+              <li>申购结果：{data.wealth_purchase.default_purchase_status}</li>
+              <li>确认份额：{data.wealth_purchase.default_confirmed_shares}</li>
+              <li>订单前缀：{data.wealth_purchase.order_id_prefix}</li>
+              {data.wealth_purchase.fail_cause ? (
+                <li style={{ color: "var(--warn)" }}>失败原因：{data.wealth_purchase.fail_cause}</li>
+              ) : null}
+            </ul>
+          </div>
+
+          <div
+            style={{
+              background: "var(--bg)",
+              border: "1px solid var(--border)",
+              borderRadius: "6px",
+              padding: "0.5rem 0.6rem",
+              fontSize: "0.78rem",
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: "0.35rem" }}>转账默认</div>
+            <ul style={{ margin: 0, paddingLeft: "1.1rem", lineHeight: 1.55 }}>
+              <li>默认金额：{data.transfer.default_amount} 元</li>
+              <li>状态：{data.transfer.default_status}</li>
+              {data.transfer.fail_cause ? <li>失败原因：{data.transfer.fail_cause}</li> : null}
+            </ul>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

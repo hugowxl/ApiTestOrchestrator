@@ -407,6 +407,7 @@ class ConversationScenario(Base):
     initial_context: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     max_turns: Mapped[int] = mapped_column(Integer, default=20)
     active_mock_profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    parent_scenario_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -439,6 +440,23 @@ class MockProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     scenario: Mapped["ConversationScenario"] = relationship(back_populates="mock_profiles")
+
+
+class MockBranchSkill(Base):
+    """LLM Mock 分支生成器的可插拔系统提示词（Skill）。"""
+
+    __tablename__ = "mock_branch_skill"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    system_prompt: Mapped[str] = mapped_column(
+        Text().with_variant(LONGTEXT(), "mysql").with_variant(LONGTEXT(), "mariadb"),
+        nullable=False,
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class ConversationTurn(Base):

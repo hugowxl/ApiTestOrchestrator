@@ -11,6 +11,7 @@ import { MockScenarioList } from "./pages/MockScenarioList";
 import { MockScenarioDetail } from "./pages/MockScenarioDetail";
 import { AgentTestList } from "./pages/AgentTestList";
 import { AgentScenarioDetail } from "./pages/AgentScenarioDetail";
+import { MockBranchSkillPage } from "./pages/MockBranchSkillPage";
 
 function NavLink({ to, children }: { to: string; children: ReactNode }) {
   const { pathname } = useLocation();
@@ -38,6 +39,7 @@ function Layout({ children }: { children: ReactNode }) {
         <NavLink to="/">服务</NavLink>
         <NavLink to="/mock">Mock 数据</NavLink>
         <NavLink to="/agent-test">Agent 测试</NavLink>
+        <NavLink to="/agent-test/mock-branch-skills">Skill 管理</NavLink>
         <span className="health">后端 /health: {health ?? "…"}</span>
       </header>
       {children}
@@ -59,6 +61,7 @@ export default function App() {
           <Route path="/mock/:scenarioId" element={<MockScenarioDetail />} />
           <Route path="/agent-test" element={<AgentTestList />} />
           <Route path="/agent-test/scenarios/:scenarioId" element={<AgentScenarioDetail />} />
+          <Route path="/agent-test/mock-branch-skills" element={<MockBranchSkillPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Layout>

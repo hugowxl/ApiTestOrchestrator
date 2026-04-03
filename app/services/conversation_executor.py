@@ -175,6 +175,12 @@ class ConversationExecutor:
             db, scenario, run, extra_variables=extra_variables,
         )
 
+        # 为 Mock 独立模式端点（不带 profile_id）提供 conversation_id -> profile_id 的绑定，
+        # 让 Mock 服务能读取“已激活”的 MockProfile 而不是硬编码默认值。
+        if getattr(scenario, "active_mock_profile_id", None):
+            from app.services.workflow_mock_server import set_mock_profile_for_conversation
+            set_mock_profile_for_conversation(session_id, scenario.active_mock_profile_id)
+
         turns = sorted(scenario.turns, key=lambda t: t.turn_index)
         passed = failed = 0
 
@@ -222,6 +228,12 @@ class ConversationExecutor:
         ctx, conversation_history, session_id = self._init_scenario(
             db, scenario, run, extra_variables=extra_variables,
         )
+
+        # 为 Mock 独立模式端点（不带 profile_id）提供 conversation_id -> profile_id 的绑定，
+        # 让 Mock 服务能读取“已激活”的 MockProfile 而不是硬编码默认值。
+        if getattr(scenario, "active_mock_profile_id", None):
+            from app.services.workflow_mock_server import set_mock_profile_for_conversation
+            set_mock_profile_for_conversation(session_id, scenario.active_mock_profile_id)
 
         turns = sorted(scenario.turns, key=lambda t: t.turn_index)
         passed = failed = 0

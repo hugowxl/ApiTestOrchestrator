@@ -1,40 +1,61 @@
-# API 自动化测试编排服务（MVP）
+# 测试编排系统
 
-基于 **FastAPI + SQLAlchemy + SQLite（可换 PostgreSQL）** 的 Swagger/OpenAPI 同步、LLM 生成结构化用例、HTTP 执行器与报告持久化。
+基于 **FastAPI + React + SQLAlchemy** 的一体化测试编排平台，覆盖 API 自动化测试、Mock 数据管理、AI Agent 多轮对话测试三大场景。
 
-## 高层架构
+## 平台能力一览
+
+| 领域 | 核心功能 |
+|------|---------|
+| **API 测试** | Swagger/OpenAPI 同步 → LLM 自动生成用例 → HTTP 执行器 → JSON/HTML/Markdown 报告 |
+| **Mock 数据** | 场景化 Mock 表 + API 规则 + 运行时状态覆盖 + LLM 辅助生成 Mock 设计 |
+| **Agent 测试** | 多轮对话编排 → 多协议适配 (OpenAI/AgentEngine/Dispatch) → 流式执行 → Mock Profile 数据驱动 → LLM 分支生成 |
+
+## 架构总览
 
 ```mermaid
-flowchart LR
-  subgraph ingest [同步]
-    SF[swagger_fetcher]
-    ON[openapi_normalizer]
-    SS[sync_service]
-    SF --> ON --> SS
+flowchart TB
+  subgraph frontend [React 前端]
+    SL[服务管理]
+    ML[Mock 数据]
+    AT[Agent 测试]
   end
-  subgraph design [用例设计]
-    LD[llm_test_designer]
-    LC[llm_client]
-    LD --> LC
+
+  subgraph backend [FastAPI 后端]
+    subgraph api [API 层]
+      R1[routes.py<br>API 测试]
+      R2[mock_routes.py<br>Mock 数据]
+      R3[agent_test_routes.py<br>Agent 测试]
+    end
+
+    subgraph services [服务层]
+      direction TB
+      S1[swagger_fetcher<br>+ openapi_normalizer<br>+ sync_service]
+      S2[llm_test_designer<br>+ test_executor<br>+ assertion_engine]
+      S3[report_service]
+      S4[mock_llm_designer]
+      S5[conversation_executor]
+      S6[mock_branch_designer]
+      S7[workflow_mock_server]
+    end
+
+    LC[llm_client<br>LangChain + OpenAI 兼容]
   end
-  subgraph run [执行]
-    TE[test_executor]
-    AE[assertion_engine]
-    TE --> AE
-  end
-  subgraph out [输出]
-    RS[report_service]
-  end
-  DB[(SQLAlchemy ORM)]
-  API[FastAPI REST]
-  SS --> DB
-  LD --> DB
-  TE --> DB
-  RS --> DB
-  API --> SS
-  API --> LD
-  API --> TE
-  API --> RS
+
+  DB[(MySQL / SQLite)]
+  AE[Agent Engine<br>被测 Agent]
+
+  SL --> R1
+  ML --> R2
+  AT --> R3
+  R1 --> S1 & S2 & S3
+  R2 --> S4
+  R3 --> S5 & S6
+  S2 --> LC
+  S4 --> LC
+  S6 --> LC
+  S5 --> AE
+  S7 -.->|SSE Mock| AE
+  services --> DB
 ```
 
 ## 目录结构
@@ -42,144 +63,170 @@ flowchart LR
 ```
 .
 ├── app/
-│   ├── main.py                 # FastAPI 入口、全局异常、健康检查
-│   ├── config.py               # pydantic-settings 环境变量
+│   ├── main.py                        # FastAPI 入口、lifespan、全局异常、健康检查
+│   ├── config.py                      # pydantic-settings，读取 .env
 │   ├── api/
-│   │   ├── routes.py           # REST：服务、同步、生成用例、执行、报告
-│   │   └── schemas.py          # 请求/响应 Pydantic 模型
+│   │   ├── routes.py                  # API 测试：服务、同步、生成用例、执行、报告
+│   │   ├── schemas.py                 # API 测试 Pydantic 模型
+│   │   ├── mock_routes.py             # Mock 数据平台：场景、表、规则、映射、LLM 生成
+│   │   ├── mock_schemas.py            # Mock 平台 Pydantic 模型
+│   │   ├── agent_test_routes.py       # Agent 测试：目标、场景、轮次、执行、Mock Profile、分支生成
+│   │   └── agent_test_schemas.py      # Agent 测试 Pydantic 模型
 │   ├── db/
-│   │   ├── base.py
-│   │   ├── session.py          # engine、Session、init_db(create_all)
-│   │   └── models.py           # 表：服务、快照、同步任务、endpoint、套件、用例、run、结果、报告
+│   │   ├── base.py                    # SQLAlchemy DeclarativeBase
+│   │   ├── session.py                 # Engine、Session、init_db、自动迁移
+│   │   └── models.py                  # 全部 ORM 模型（22 张表）
 │   ├── schemas/
-│   │   └── test_case_schema.py # LLM 输出 JSON Schema + jsonschema 校验
+│   │   └── test_case_schema.py        # LLM 输出 JSON Schema 校验
 │   ├── services/
-│   │   ├── swagger_fetcher.py
-│   │   ├── openapi_normalizer.py
-│   │   ├── sync_service.py
-│   │   ├── llm_client.py       # LangChain ChatOpenAI → OpenAI 兼容 /v1/chat/completions
-│   │   ├── llm_test_designer.py
-│   │   ├── test_executor.py    # {{var}}、extract、多步顺序执行
-│   │   ├── assertion_engine.py # status / jsonpath / header / body_contains
-│   │   └── report_service.py   # JSON/HTML/Markdown + DB 元数据
+│   │   ├── swagger_fetcher.py         # 拉取 OpenAPI spec
+│   │   ├── openapi_normalizer.py      # 归一化 OpenAPI 2/3 → endpoint 列表
+│   │   ├── sync_service.py            # Swagger 同步（快照、hash、upsert）
+│   │   ├── llm_client.py             # LangChain ChatOpenAI 封装
+│   │   ├── llm_test_designer.py       # LLM 生成 API 测试用例
+│   │   ├── test_executor.py           # HTTP 执行器（变量替换、多步、断言）
+│   │   ├── assertion_engine.py        # 断言：status_code / jsonpath / header / body_contains
+│   │   ├── report_service.py          # JSON / HTML / Markdown 报告生成
+│   │   ├── mock_llm_designer.py       # LLM 生成 Mock 表结构与规则
+│   │   ├── conversation_executor.py   # 多轮对话执行器（多协议、流式、Mock 集成）
+│   │   ├── mock_branch_designer.py    # LLM 生成 Mock 数据分支 + 对话场景
+│   │   └── workflow_mock_server.py    # 工作流 Mock 服务器（内嵌 + 独立双模式）
 │   └── utils/
-│       ├── errors.py           # ErrorCode、AppError、retryable
-│       ├── redact.py           # 日志/报告脱敏
-│       └── http_exc.py         # AppError → HTTP 状态码
-├── frontend/                   # React + Vite 管理控制台（与 /api/v1 对齐，见 frontend/README.md）
-├── tests/                      # 解析、Schema、变量替换、脱敏
-├── data/                       # 运行时 SQLite 与报告（gitignore）
+│       ├── errors.py                  # ErrorCode、AppError、retryable
+│       ├── redact.py                  # 日志/报告脱敏
+│       └── http_exc.py               # AppError → HTTP 状态码映射
+├── frontend/                          # React + Vite + TypeScript 管理控制台
+│   ├── src/
+│   │   ├── App.tsx                    # 路由与布局
+│   │   ├── api/client.ts             # 后端 API 客户端
+│   │   └── pages/
+│   │       ├── ServiceList.tsx        # 服务列表 & 注册
+│   │       ├── ServiceDetail.tsx      # 服务详情：同步、接口、批量生成/执行
+│   │       ├── EndpointCasesPage.tsx  # 单接口：套件、用例、执行
+│   │       ├── SuiteDetail.tsx        # 套件详情：用例列表、执行、报告
+│   │       ├── RunDetail.tsx          # 执行结果 & 报告查看
+│   │       ├── MockScenarioList.tsx   # Mock 场景列表
+│   │       ├── MockScenarioDetail.tsx # Mock 场景详情：表、规则、映射
+│   │       ├── AgentTestList.tsx      # Agent 目标列表、发现/导入、场景管理
+│   │       ├── AgentScenarioDetail.tsx# 对话场景：轮次编排、Mock Profile、流式执行
+│   │       └── MockBranchSkillPage.tsx# 分支生成 Skill 管理
+│   └── package.json
+├── data/                              # 运行时 SQLite & 报告（gitignore）
 ├── requirements.txt
 ├── .env.example
 └── README.md
 ```
 
-## 数据库设计要点
+## 数据模型
 
-| 表 | 作用 | 主键/唯一/索引 |
-|----|------|----------------|
-| `target_service` | 被测服务元数据 | PK `id` |
-| `swagger_snapshot` | 每次拉取的 spec 全文 + `content_hash` | `service_id` + `fetched_at` 查询最新；`content_hash` 增量 |
-| `sync_job` | 单次同步任务与统计 | FK `service_id` |
-| `endpoint` | 归一化接口 | **唯一** `(service_id, method, path)`；`fingerprint` 检测片段变更 |
-| `test_suite` | LLM 生成批次 | FK `endpoint_id` 可选、`snapshot_id` 版本钉扎 |
-| `test_case` | 可执行步骤 JSON | FK `suite_id`；`status`: draft/approved |
-| `test_run` | 一次执行 | FK `suite_id`；`target_base_url` |
-| `test_result` | 每用例结果与快照（已脱敏 header） | FK `run_id`, `case_id` |
-| `report` | 报告文件路径 + `summary_json` | FK `run_id` |
+### API 测试
 
-迁移：当前 MVP 使用 `Base.metadata.create_all()`（见 `init_db()`）。生产可接入 **Alembic**，以 `app/db/models.py` 为单一事实来源生成 revision。
+| 表 | 说明 |
+|----|------|
+| `target_service` | 被测服务元数据（name、base_url、swagger_url） |
+| `swagger_snapshot` | 每次拉取的 spec 全文 + content_hash |
+| `sync_job` | 同步任务记录与统计 |
+| `endpoint` | 归一化接口，唯一 `(service_id, method, path)` |
+| `test_suite` | LLM 生成批次 |
+| `test_case` | 可执行多步用例（steps_json + assertions） |
+| `test_run` | 一次执行记录 |
+| `test_result` | 每用例结果与快照 |
+| `report` | 报告文件路径 + 摘要 |
 
-**MySQL 已有库**：若同步时报 `Data too long for column 'raw_spec_json'`，说明列仍是 64KB 级 `TEXT`，请执行：
+### Mock 数据平台
 
-```sql
-ALTER TABLE swagger_snapshot MODIFY COLUMN raw_spec_json LONGTEXT NOT NULL;
-ALTER TABLE endpoint MODIFY COLUMN spec_json LONGTEXT NOT NULL;
-```
+| 表 | 说明 |
+|----|------|
+| `mock_scenario` | Mock 场景（业务维度） |
+| `mock_data_table` | 场景下的数据表（schema_json + rows_json） |
+| `mock_data_table_runtime_state` | 运行时数据覆盖 |
+| `mock_api_rule` | API 匹配规则与响应模板 |
+| `mock_endpoint_mapping` | 外部 endpoint 到 Mock 规则的映射 |
 
-（新建库且由当前 ORM 建表时，`swagger_snapshot.raw_spec_json` / `endpoint.spec_json` 在 MySQL 上已为 `LONGTEXT`。）
+### Agent 多轮对话测试
 
-**自动升级**：启动时 `init_db()` 会检测 MySQL/MariaDB 中上述列类型，若为普通 `TEXT`/`VARCHAR` 等则自动 `ALTER` 为 `LONGTEXT`（见 `app/db/session.py`）。
+| 表 | 说明 |
+|----|------|
+| `agent_target` | Agent 端点（chat_url、api_format、认证配置） |
+| `conversation_scenario` | 对话场景（关联 agent_target，可选 active_mock_profile_id） |
+| `conversation_turn` | 场景中的单轮定义（user_message + 期望断言） |
+| `agent_test_run` | 一次场景执行 |
+| `turn_result` | 每轮实际结果（含 request_snapshot、raw_response） |
+| `mock_profile` | Mock 数据配置集（profile_data JSON，绑定场景） |
+| `mock_branch_skill` | 分支生成 Skill（可自定义 system_prompt） |
 
-**本机 Postman/curl 命中代理**：若访问 `http://127.0.0.1:8000` 却返回公司网关 HTML/504，请在系统或 Postman 中为 `127.0.0.1,localhost` 设置 **绕过代理（NO_PROXY）**，否则请求到不了 uvicorn，`root.log` 也不会有对应行。
+## HTTP API
 
-**LLM 报 `CERTIFICATE_VERIFY_FAILED` / 自签证书链**：多为公司 HTTPS 解密代理。优先在 `.env` 设置 **`LLM_CA_BUNDLE`** 为公司根证书 PEM 路径；仅在可信内网排障时可设 **`LLM_VERIFY_SSL=false`**（关闭校验，有中间人风险）。改后需重启 uvicorn；`get_settings()` 有缓存。
-
-**执行用例访问被测服务时的 HTTPS 证书**：与 LLM 无关。配置 **`EXECUTOR_CA_BUNDLE`**（PEM 路径，优先）或 **`EXECUTOR_VERIFY_SSL=false`**（仅排障，不安全）；`test_executor` 里 `httpx.Client(verify=…)` 会生效。  
-**报告里「期望 200/422，实际 504」**：**504 是网关超时**，常见于 Nginx/代理在 **`HTTP_TIMEOUT_SECONDS`（默认 30s）** 内未等到上游响应；**明文 `http://` 目标不涉及 TLS 证书**。请检查 `100.100.135.210:8080` 路由是否可达、上游是否过慢，或适当**加大 `HTTP_TIMEOUT_SECONDS`**。
-
-**单 endpoint 生成「一直转圈」**：接口要等 **整次 LLM 完成** 才返回。若网关误开 **流式**，旧版客户端可能长时间读不完；当前已在请求体中固定 **`stream": false`**。超时由 **`LLM_TIMEOUT_SECONDS`**（默认 120s）控制，与执行用例的 **`HTTP_TIMEOUT_SECONDS`** 无关；模型慢或 `spec_json` 极大时可加大前者。日志（`app.services.llm_client`）会打 `LLM api_url` / `request body` / `response`，便于区分卡在请求前、HTTP 还是解析。
-
-**调试时不要无限等 POST**：生成类接口可能接近 `LLM_TIMEOUT_SECONDS` 才返回。用 curl 探测时请加大上限或接受超时，例如 `curl --connect-timeout 5 --max-time 25 ...`：若在 `max-time` 内无 HTTP 响应，说明处理仍卡在服务端（多为 LLM 同步调用）；对照 `root.log` 中同一 `request id` 是否已有 `-->` 而无 `<--`，或是否已出现 `LLM api_url=`。
-
-**`POST /api/v1/endpoints/{id}/generate-cases` 分步追踪**（`app.generate_cases.trace`，写入 `root.log`）：每条请求有唯一 `[trace=xxxxxxxxxxxx]`。按顺序对照，**最后出现的一条之后**即为卡点。
-
-| 步骤 | 含义 |
-|------|------|
-| GC-01～03 | 进入路由、构造 `LLMTestDesigner`、调用 `generate_for_endpoint` |
-| GC-10～13 | 进入 designer、`db.get(Endpoint)`、拼 prompt |
-| GC-14 | 即将调用 LLM（若此后长时间无 GC-15，卡在 LLM） |
-| GC-30～31 | 进入 `chat_json`、即将 `httpx` POST（若 GC-31 后有 GC-32，说明 HTTP 已返回） |
-| GC-32～34 | POST 返回、解析 JSON 信封、取出 `content` |
-| GC-15 | LLM 文本已回到 designer |
-| GC-16～19 | 解析 LLM 输出 JSON、Schema 校验 |
-| GC-20～24 | 写库 flush/commit/refresh |
-| GC-99 | 路由即将返回；GC-ERR 为业务 `AppError` |
-
-批量 `generate-cases-batch` **不会**打上述 trace（未调用 `trace_begin`），避免日志爆炸。
-
-**POST 很快 404、不像在等 LLM**：若路径**没有**前缀 `/api/v1`，Starlette 会直接 **404**（`{"detail":"Not Found"}`），请求根本不会进业务逻辑，因此**不会**出现长时间等待。正确示例：`POST /api/v1/services/{id}/generate-cases-batch`。若漏了前缀，响应头会带 **`X-API-Hint`** 提示。业务里「服务不存在」也是 404，但 body 为 `detail: { "code": "NOT_FOUND", "message": "..." }`，可与路由未命中区分。
-
-## HTTP API（核心）
+### API 测试编排
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/v1/services` | 注册服务（name、base_url、swagger_url） |
+| POST | `/api/v1/services` | 注册服务 |
 | GET | `/api/v1/services` | 列表 |
-| GET | `/api/v1/services/{id}/endpoints` | 同步后的 endpoint 列表 |
-| GET | `/api/v1/services/{id}/stats` | endpoint 数量 |
-| POST | `/api/v1/services/{id}/sync` | 触发 Swagger 拉取与 upsert（body 可带 `swagger_url`、`fetch_headers`） |
-| POST | `/api/v1/endpoints/{id}/generate-cases` | LLM 生成用例并入库（需 `LLM_API_KEY`）；响应体为套件元数据，**`id` 即 `suite_id`** |
-| GET | `/api/v1/endpoints/{id}/suites` | 该 endpoint 下套件列表（按创建时间倒序） |
-| GET | `/api/v1/services/{id}/suites` | 该服务下全部套件列表 |
-| GET | `/api/v1/suites/{suite_id}` | 单个套件元数据 |
-| GET | `/api/v1/suites/{suite_id}/test-cases` | **查看套件内全部用例**（含 `steps_json`、`variables_json`、`status`） |
-| POST | `/api/v1/services/{id}/generate-cases-batch` | **批量** LLM 生成：可选 `endpoint_ids`（缺省=该服务全部）、`limit`、`suite_name_prefix`、`approve`、`continue_on_error` |
-| POST | `/api/v1/suites/{id}/run` | 执行套件内用例；可选 `only_approved`、`target_base_url`、生成报告 |
-| POST | `/api/v1/services/{id}/run-suites-batch` | **批量** 执行：可选 `suite_ids`（缺省=该服务下所有套件）；每套件一次 `test_run` + 可选报告 |
+| POST | `/api/v1/services/{id}/sync` | 触发 Swagger 同步 |
+| GET | `/api/v1/services/{id}/endpoints` | 同步后 endpoint 列表 |
+| POST | `/api/v1/endpoints/{id}/generate-cases` | LLM 生成用例 |
+| POST | `/api/v1/services/{id}/generate-cases-batch` | 批量 LLM 生成 |
+| POST | `/api/v1/suites/{id}/run` | 执行套件 |
+| POST | `/api/v1/services/{id}/run-suites-batch` | 批量执行 |
 | GET | `/api/v1/runs/{id}` | 查询运行状态 |
-| GET | `/api/v1/runs/{id}/reports` | 报告列表（含 `storage_path`） |
+| GET | `/api/v1/runs/{id}/reports` | 报告列表 |
 
-错误体：`{ "code", "message", "retryable", "details" }`。Swagger 拉取失败、LLM 5xx/429 等会标为可重试并映射 **503**。
+### Agent 多轮对话测试
 
-**生成后如何查看用例**：单次生成接口返回的 JSON 里 **`id` 就是 `suite_id`**。浏览器或 Postman 调用 **`GET /api/v1/suites/{suite_id}/test-cases`** 即可看到每条用例的 `name`、`steps_json`、`variables_json` 等。批量生成时响应里的 `suites[].id` 同理；也可先 **`GET /api/v1/services/{service_id}/suites`** 或 **`GET /api/v1/endpoints/{endpoint_id}/suites`** 再选套件。数据库表为 **`test_case`**（与 `test_suite` 外键关联）。
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/v1/agent-test/targets` | 创建 Agent 端点 |
+| GET | `/api/v1/agent-test/targets` | 列出所有端点 |
+| POST | `/api/v1/agent-test/discover` | 从 Agent Engine 发现 Agent |
+| POST | `/api/v1/agent-test/discover/import` | 批量导入发现的 Agent |
+| POST | `/api/v1/agent-test/scenarios` | 创建对话场景 |
+| POST | `/api/v1/agent-test/scenarios/{id}/turns` | 添加对话轮次 |
+| PUT | `/api/v1/agent-test/turns/{id}` | 编辑轮次 |
+| POST | `/api/v1/agent-test/turns/{id}/execute` | 单独执行某轮 |
+| POST | `/api/v1/agent-test/scenarios/{id}/run` | 执行整个场景 |
+| POST | `/api/v1/agent-test/scenarios/{id}/run-stream` | 流式执行（SSE 逐轮推送） |
+| POST | `/api/v1/agent-test/scenarios/{id}/mock-profiles` | 创建 Mock Profile |
+| POST | `/api/v1/agent-test/mock-profiles/{id}/activate` | 激活 Profile |
+| POST | `/api/v1/agent-test/scenarios/{id}/generate-branches` | LLM 一键生成测试分支 |
+| GET | `/api/v1/agent-test/mock-branch-skills` | 列出分支生成 Skill |
 
-**如何执行用例并生成测试报告**：
+### Mock 工作流服务器
 
-1. **准备 `suite_id`**：见上节；确认套件下有用例（`GET .../test-cases`）。
-2. **准备被测 Base URL**：执行时会把用例里的 `path` 拼到该地址上。可在 `.env` 配置 **`DEFAULT_TARGET_BASE_URL`**，或在请求体里覆盖 **`target_base_url`**（需能从运行本服务的环境访问到，例如 `http://192.168.x.x:8080`）。
-3. **触发执行（单套件）**  
-   `POST /api/v1/suites/{suite_id}/run`  
-   Body 示例：`{"target_base_url": "http://localhost:8080", "only_approved": false, "generate_reports": true}`  
-   - **`only_approved`**：为 `true` 时只跑状态为 **`approved`** 的用例；生成时若未传 `approve: true`，用例默认为 **`draft`**，此时须设为 **`false`** 才会执行。  
-   - **`generate_reports`**：默认 **`true`**，跑完后在磁盘写入 **JSON / HTML / Markdown** 并在库里登记 **`report`** 记录。
-4. **看结果**  
-   - 响应体为 **`TestRun`**，记下 **`id` 即 `run_id`**，字段 **`status`** 为 `success` / `failed` / `partial`。  
-   - **`GET /api/v1/runs/{run_id}`**：再次查询运行摘要。  
-   - **`GET /api/v1/runs/{run_id}/reports`**：每条报告的 **`storage_path`** 为本机绝对路径，可直接打开 **`report.html`** / **`report.md`** / **`report.json`**。  
-   - 报告目录约定：项目下 **`data/reports/{run_id}/`**（与 `report_service` 一致）。
-5. **多套件批量执行**：`POST /api/v1/services/{service_id}/run-suites-batch`，可选 **`suite_ids`**；不传则该服务下**所有套件**各产生一次 `test_run`；同样支持 **`target_base_url`**、**`only_approved`**、**`generate_reports`**。
+主应用启动时自动拉起独立 Mock 服务器（默认端口 30001）：
 
-## 运行
+| 端点 | 说明 |
+|------|------|
+| `GET /health` | 健康检查 |
+| `POST /v1/chat/{conversation_id}` | 旧版工作流入口 |
+| `POST /v1/0/agent-manager/workflows/{wf_id}/conversations/{conv_id}` | 新版工作流入口（VersatileProxy 兼容） |
+
+内嵌路由（主应用端口 8000，数据源为 MockProfile）：
+
+| 端点 | 说明 |
+|------|------|
+| `POST /mock-workflow/{profile_id}/v1/chat/{conversation_id}` | Profile 数据驱动的 Mock |
+| `GET /mock-workflow/{profile_id}/health` | Profile 健康检查 |
+
+支持的工作流类型：理财推荐、余额查询、转账（基于关键词自动路由）。
+
+## 快速开始
+
+### 后端
 
 ```bash
 cd 测试系统
-copy .env.example .env   # 填写 LLM_API_KEY 等
+copy .env.example .env          # 编辑 .env，填写 LLM_API_KEY 等
 pip install -r requirements.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### Web 控制台（可选）
+启动后：
+- 主服务：http://127.0.0.1:8000
+- API 文档：http://127.0.0.1:8000/docs
+- Mock 工作流服务器：http://127.0.0.1:30001（自动启动）
+
+### 前端
 
 ```bash
 cd frontend
@@ -187,12 +234,78 @@ npm install
 npm run dev
 ```
 
-浏览器访问 **http://127.0.0.1:5173**。开发模式下 Vite 将 `/api`、`/health` 代理到 `127.0.0.1:8000`；若前端与后端不同源部署，请设置 **`CORS_ORIGINS`**（见 `.env.example`）及前端的 **`VITE_API_BASE`**（见 `frontend/README.md`）。
+浏览器访问 http://127.0.0.1:5173，Vite 自动代理 `/api` 到后端。
 
-- LLM 调用依赖 **LangChain**（`langchain-openai` + `langchain-core`），仍走 OpenAI 兼容 `base_url`；`LLM_CA_BUNDLE` / `LLM_VERIFY_SSL` 通过注入 **`httpx.Client`** 生效；`max_retries=0` 与直连行为接近，避免 SDK 默认重试拉长等待。
-- 交互文档：<http://127.0.0.1:8000/docs>
-- 文件日志（默认）：`D:/applog/<APP_NAME>/root.log`（约 10MB 轮转，保留 5 个备份）。**本机任意进入 FastAPI 的 HTTP 请求**（含 Postman）由中间件 `app.request` 写 `-->` / `<--` 行，并与 `uvicorn.access` 共用同一文件 Handler；`import app.main` 时即初始化，避免早于 lifespan 的请求不落盘。级别由 `apply_forced_log_levels` 固定为 INFO（或 DEBUG），避免默认 `root=WARNING` 丢日志。无法建立 TCP、或未打到本机 uvicorn 端口的请求不在此列。
-- 将 `DATABASE_URL` 改为 `postgresql+psycopg://...` 即可使用 PostgreSQL（需安装 `psycopg[binary]`）。
+## 环境变量 (.env)
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `DATABASE_URL` | `sqlite:///./data/app.db` | 数据库连接，支持 SQLite / MySQL / PostgreSQL |
+| `LLM_API_KEY` | — | LLM API 密钥（必填，OpenAI 兼容） |
+| `LLM_BASE_URL` | `https://api.openai.com/v1` | LLM 接口地址 |
+| `LLM_MODEL` | `gpt-4o-mini` | 模型名称 |
+| `LLM_TIMEOUT_SECONDS` | `300.0` | LLM 请求超时（分支生成等复杂任务建议 ≥ 180） |
+| `LLM_CA_BUNDLE` | — | 公司根证书 PEM 路径（HTTPS 解密代理场景） |
+| `LLM_VERIFY_SSL` | `true` | 是否校验 LLM HTTPS 证书 |
+| `HTTP_TIMEOUT_SECONDS` | `30.0` | 执行用例时的 HTTP 超时 |
+| `DEFAULT_TARGET_BASE_URL` | `http://localhost:8080` | 默认被测服务地址 |
+| `CORS_ORIGINS` | `http://localhost:5173,...` | CORS 允许源 |
+| `MOCK_SERVER_PORT` | `30001` | 独立 Mock 服务器端口 |
+| `MOCK_SERVER_HOST` | `127.0.0.1` | 独立 Mock 服务器地址 |
+
+## 主要功能说明
+
+### 1. API 自动化测试
+
+1. **注册服务**：提供 Swagger/OpenAPI URL
+2. **同步接口**：自动拉取并归一化为 endpoint
+3. **LLM 生成用例**：基于 OpenAPI 契约 + 业务规则，LLM 输出结构化多步测试用例
+4. **执行测试**：变量替换 `{{var}}`、上下文 extract、多步顺序执行、自动断言
+5. **生成报告**：JSON / HTML / Markdown 三种格式
+
+### 2. Mock 数据平台
+
+- **场景管理**：按业务维度组织 Mock 数据
+- **数据表**：定义 schema + 初始行，运行时可覆盖
+- **API 规则**：匹配条件 + 响应模板
+- **LLM 辅助**：自动生成 Mock 表结构与测试数据
+
+### 3. Agent 多轮对话测试
+
+- **多协议适配**：OpenAI Chat Completions / Agent Engine / Dispatch 三种格式
+- **Agent 发现**：自动从 Agent Engine 发现并导入 Agent
+- **对话编排**：定义多轮对话（用户消息 + 期望关键词 + 断言）
+- **流式执行**：SSE 逐轮推送结果到前端
+- **轮次编辑**：运行后可修改并重新执行单轮
+- **Mock Profile**：为每个场景配置不同的 Mock 数据集，控制 Agent 走不同业务路径
+- **LLM 分支生成**：输入业务描述，自动生成多个 MockProfile + 对应的多轮对话场景，覆盖不同路径分支
+
+### Mock Profile 工作原理
+
+```
+场景 A: 购买理财产品
+  ├── Profile "正常购买"     → 基金卡余额 50000（足够）     → 2 轮对话
+  ├── Profile "余额不足转账"  → 基金卡 1000 / 储蓄卡 30000  → 4 轮对话
+  └── Profile "双卡均不足"    → 基金卡 500 / 储蓄卡 200     → 3 轮对话
+```
+
+每个 Profile 的 `profile_data` 定义了工作流 Mock 应返回的数据，执行测试时通过 `X-Mock-Workflow-Url` 请求头注入 Mock 地址。
+
+## 常见问题
+
+**LLM 生成超时**：`.env` 中增大 `LLM_TIMEOUT_SECONDS`（默认 300 秒）。分支生成涉及复杂 JSON 输出，建议 ≥ 180。
+
+**本机请求命中公司代理**：为 `127.0.0.1,localhost` 设置绕过代理（NO_PROXY）。
+
+**LLM 报 `CERTIFICATE_VERIFY_FAILED`**：设置 `LLM_CA_BUNDLE` 为公司根证书 PEM 路径；仅排障时可设 `LLM_VERIFY_SSL=false`。
+
+**MySQL `Data too long`**：启动时 `init_db()` 会自动将 `TEXT` 列升级为 `LONGTEXT`。若仍报错：
+```sql
+ALTER TABLE swagger_snapshot MODIFY COLUMN raw_spec_json LONGTEXT NOT NULL;
+ALTER TABLE endpoint MODIFY COLUMN spec_json LONGTEXT NOT NULL;
+```
+
+**Mock 服务器端口冲突**：修改 `.env` 中的 `MOCK_SERVER_PORT`；启动时会自动检测端口占用并跳过。
 
 ## 单元测试
 
@@ -200,28 +313,9 @@ npm run dev
 pytest tests -q
 ```
 
-## 设计约束（与需求对齐）
+## 技术栈
 
-- **LLM 不执行 HTTP**：仅生成符合 Schema 的结构化用例；执行完全在 `test_executor`。
-- **执行器可独立重跑**：已入库的 `test_case` 不依赖再次调用 LLM。
-- **敏感信息**：`redact_headers` 用于结果快照；日志侧可用 `redact_for_log`。
-
-### 如何让模型遵守 `test_case_schema`（方案建议）
-
-| 手段 | 说明 |
-|------|------|
-| **Prompt 与 Schema 一致** | 旧版曾写「dependencies 写 unknown 字符串」，与 Schema（`string[]`）冲突，会系统性带偏模型；已在 `llm_test_designer` 的 System/User 中改为 `["unknown"]` 并写明 `id` / `name` / `steps` 必填。 |
-| **结构摘要 + 最小示例（Few-shot 骨架）** | 在 User 中嵌入与真实校验器一致的字段说明 + 一行合法 JSON 示意，比只写「输出 JSON」有效得多；执行层字段见 `app/schemas/test_case_schema.py`。 |
-| **`response_format: json_object`** | 已启用，减少胡扯前缀，但不保证嵌套字段齐全，仍需上文约束。 |
-| **校验失败自动重试（可选后续）** | 将 `jsonschema` 的 `errors` 拼进第二轮 User：「上次错误如下，请只输出修正后的 JSON」，常能一次修好格式问题（注意 token 与延迟）。 |
-| **更强/更听话的模型** | 小模型易偷懒成「扁平用例」；换更大模型或明确禁止 `expected_status` 扁平字段，只允许多步 `steps`。 |
-| **两阶段生成（可选后续）** | 先让模型只输出用例意图列表，再由第二步展开为带 `steps` + `assertions` 的完整结构，降低单次 JSON 复杂度。 |
-
-实现上：**契约以 `LLM_TEST_DESIGN_SCHEMA` 为唯一真相**；Prompt 应用自然语言复述同一契约，并避免与 Schema 矛盾的示例。
-
-## TODO（后续增强）
-
-- Celery/RQ 异步化同步与大批量生成
-- 更完整的 `$ref` / 远程引用解析
-- 删除同步后已消失的 path、多接口 bundle 提示词与路由
-- `test_case` 人工审核工作流与 CI 仅 `approved`
+- **后端**：FastAPI、SQLAlchemy、httpx、LangChain (langchain-openai)、Pydantic
+- **前端**：React 19、React Router、Vite、TypeScript
+- **数据库**：SQLite（开发）/ MySQL / PostgreSQL
+- **LLM**：任意 OpenAI 兼容接口

@@ -214,6 +214,7 @@ def init_db() -> None:
     _ensure_agent_target_new_columns()
     _add_missing_columns("conversation_scenario", [
         ("active_mock_profile_id", "VARCHAR(36)", "NULL"),
+        ("parent_scenario_id", "VARCHAR(36)", "NULL"),
     ])
 
 

@@ -139,6 +139,7 @@ class ScenarioOut(BaseModel):
     initial_context: dict[str, Any] | None = None
     max_turns: int
     active_mock_profile_id: str | None = None
+    parent_scenario_id: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -272,9 +273,37 @@ class MockProfileOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class MockBranchSkillOut(BaseModel):
+    id: str
+    name: str
+    description: str | None = None
+    system_prompt: str
+    enabled: bool = True
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MockBranchSkillCreate(BaseModel):
+    name: str = Field(..., max_length=255)
+    description: str | None = None
+    system_prompt: str
+    enabled: bool = True
+
+
+class MockBranchSkillUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=255)
+    description: str | None = None
+    system_prompt: str | None = None
+    enabled: bool | None = None
+
+
 class GenerateBranchesRequest(BaseModel):
     business_description: str = Field(
         ..., description="业务场景描述，包含需要覆盖的路径分支"
     )
     max_branches: int = Field(default=3, ge=1, le=10)
     max_turns_per_branch: int = Field(default=5, ge=2, le=20)
+    # 用于注入 LLM 的系统提示词（Skill）
+    skill_id: str | None = Field(default=None, description="可选：用于一键生成测试分支的 Skill ID")
