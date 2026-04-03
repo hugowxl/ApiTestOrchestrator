@@ -339,3 +339,187 @@ class MockEndpointMapping(Base):
     response_template_json: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+#  Agent 多轮对话测试
+# ---------------------------------------------------------------------------
+
+
+class AgentTestRunStatus(str, enum.Enum):
+    pending = "pending"
+    running = "running"
+    passed = "passed"
+    failed = "failed"
+    partial = "partial"
+    error = "error"
+
+
+class AgentTarget(Base):
+    """被测 Agent 端点：对话 API 地址、认证、工具定义等。
+
+    api_format:
+      - "openai_chat"  → 标准 OpenAI Chat Completions 格式
+      - "agent_engine" → DevelopmentAgentEngine 的 /api/v1/agent/execute 格式
+    """
+
+    __tablename__ = "agent_target"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    chat_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    api_format: Mapped[str] = mapped_column(String(32), default="openai_chat")
+    model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    auth_type: Mapped[str] = mapped_column(String(32), default="bearer")
+    auth_config: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    tools_schema: Mapped[list | None] = mapped_column(JSONType, nullable=True)
+    default_system_prompt: Mapped[str | None] = mapped_column(
+        Text().with_variant(LONGTEXT(), "mysql").with_variant(LONGTEXT(), "mariadb"),
+        nullable=True,
+    )
+    # Agent Engine 专属字段
+    engine_agent_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    engine_agent_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    engine_base_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    agent_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    agent_tools: Mapped[list | None] = mapped_column(JSONType, nullable=True)
+    extra_config: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    scenarios: Mapped[list["ConversationScenario"]] = relationship(
+        back_populates="agent_target", cascade="all, delete-orphan"
+    )
+
+
+class ConversationScenario(Base):
+    """多轮对话测试场景：如"新用户购买中低风险基金"。"""
+
+    __tablename__ = "conversation_scenario"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    agent_target_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_target.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(512), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tags: Mapped[list | None] = mapped_column(JSONType, nullable=True)
+    initial_context: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    max_turns: Mapped[int] = mapped_column(Integer, default=20)
+    active_mock_profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    agent_target: Mapped["AgentTarget"] = relationship(back_populates="scenarios")
+    turns: Mapped[list["ConversationTurn"]] = relationship(
+        back_populates="scenario", cascade="all, delete-orphan", order_by="ConversationTurn.turn_index"
+    )
+    runs: Mapped[list["AgentTestRun"]] = relationship(
+        back_populates="scenario", cascade="all, delete-orphan"
+    )
+    mock_profiles: Mapped[list["MockProfile"]] = relationship(
+        back_populates="scenario", cascade="all, delete-orphan"
+    )
+
+
+class MockProfile(Base):
+    """Mock 数据配置集：定义某次测试执行时工作流 Mock 应返回的业务数据。"""
+
+    __tablename__ = "mock_profile"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    scenario_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("conversation_scenario.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    profile_data: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    scenario: Mapped["ConversationScenario"] = relationship(back_populates="mock_profiles")
+
+
+class ConversationTurn(Base):
+    """场景中的单轮对话定义：用户说什么 + 期望 Agent 做什么。"""
+
+    __tablename__ = "conversation_turn"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    scenario_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("conversation_scenario.id"), nullable=False, index=True
+    )
+    turn_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    user_message: Mapped[str] = mapped_column(
+        Text().with_variant(LONGTEXT(), "mysql").with_variant(LONGTEXT(), "mariadb"),
+        nullable=False,
+    )
+    expected_intent: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    expected_tool_calls: Mapped[list | None] = mapped_column(JSONType, nullable=True)
+    expected_keywords: Mapped[list | None] = mapped_column(JSONType, nullable=True)
+    forbidden_keywords: Mapped[list | None] = mapped_column(JSONType, nullable=True)
+    assertions: Mapped[list | None] = mapped_column(JSONType, nullable=True)
+    extract: Mapped[list | None] = mapped_column(JSONType, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    scenario: Mapped["ConversationScenario"] = relationship(back_populates="turns")
+
+
+class AgentTestRun(Base):
+    """一次对话场景的执行记录。"""
+
+    __tablename__ = "agent_test_run"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    scenario_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("conversation_scenario.id"), nullable=False, index=True
+    )
+    status: Mapped[AgentTestRunStatus] = mapped_column(
+        Enum(AgentTestRunStatus, native_enum=False, values_callable=lambda x: [i.value for i in x]),
+        default=AgentTestRunStatus.pending,
+    )
+    total_turns: Mapped[int] = mapped_column(Integer, default=0)
+    passed_turns: Mapped[int] = mapped_column(Integer, default=0)
+    failed_turns: Mapped[int] = mapped_column(Integer, default=0)
+    config_override: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    scenario: Mapped["ConversationScenario"] = relationship(back_populates="runs")
+    turn_results: Mapped[list["TurnResult"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", order_by="TurnResult.turn_index"
+    )
+
+
+class TurnResult(Base):
+    """单轮对话的执行结果。"""
+
+    __tablename__ = "turn_result"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_test_run.id"), nullable=False, index=True
+    )
+    turn_id: Mapped[str] = mapped_column(String(36), ForeignKey("conversation_turn.id"), nullable=False)
+    turn_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    actual_user_message: Mapped[str] = mapped_column(
+        Text().with_variant(LONGTEXT(), "mysql").with_variant(LONGTEXT(), "mariadb"),
+        nullable=False,
+    )
+    actual_agent_response: Mapped[str | None] = mapped_column(
+        Text().with_variant(LONGTEXT(), "mysql").with_variant(LONGTEXT(), "mariadb"),
+        nullable=True,
+    )
+    actual_tool_calls: Mapped[list | None] = mapped_column(JSONType, nullable=True)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    # 请求快照：记录实际发出的 URL / headers / body，用于调试
+    request_snapshot: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    raw_response: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    assertion_results: Mapped[list | None] = mapped_column(JSONType, nullable=True)
+    extracted_vars: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    run: Mapped["AgentTestRun"] = relationship(back_populates="turn_results")
+    turn: Mapped["ConversationTurn"] = relationship()

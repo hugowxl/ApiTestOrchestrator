@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { notifyApiError } from "../api/apiErrorBus";
 import * as api from "../api/client";
@@ -19,6 +19,9 @@ export function ServiceDetail() {
   const [batchLimit, setBatchLimit] = useState("");
   const [batchApprove, setBatchApprove] = useState(false);
   const [batchContinue, setBatchContinue] = useState(true);
+  const [batchBusinessContext, setBatchBusinessContext] = useState("");
+  const [batchScenarioMatrixJson, setBatchScenarioMatrixJson] = useState("");
+  const [batchScenarioMax, setBatchScenarioMax] = useState("128");
   const [batchResult, setBatchResult] = useState<api.GenerateCasesBatchOut | null>(null);
 
   const [runBase, setRunBase] = useState("");
@@ -28,6 +31,23 @@ export function ServiceDetail() {
 
   /** 各 endpoint「生成用例」：旁路 loading / 成功勾 */
   const [endpointGenUi, setEndpointGenUi] = useState<Record<string, "idle" | "loading" | "done">>({});
+  /** 单次生成返回的路径覆盖报告（与 scenario_matrix 对应） */
+  const [endpointPathCoverage, setEndpointPathCoverage] = useState<
+    Record<string, api.ScenarioPathCoverageOut | undefined>
+  >({});
+  /** 单接口自定义场景矩阵 JSON；留空则使用上方「批量 LLM 生成」里的共享场景矩阵 */
+  const [endpointScenarioMatrixJson, setEndpointScenarioMatrixJson] = useState<Record<string, string>>({});
+  const [endpointMatrixOpen, setEndpointMatrixOpen] = useState<Record<string, boolean>>({});
+  /** 每接口「测试设计说明」编辑区展开与草稿（保存后写入 DB，生成用例时高优先级注入 LLM） */
+  const [endpointNotesOpen, setEndpointNotesOpen] = useState<Record<string, boolean>>({});
+  const [endpointNotesDraft, setEndpointNotesDraft] = useState<Record<string, string>>({});
+  const [endpointNotesSaving, setEndpointNotesSaving] = useState<string | null>(null);
+
+  const resolveScenarioMatrixJsonText = (endpointId: string) => {
+    const local = (endpointScenarioMatrixJson[endpointId] ?? "").trim();
+    if (local) return local;
+    return batchScenarioMatrixJson.trim();
+  };
 
   const load = useCallback(() => {
     if (!serviceId) return;
@@ -75,15 +95,24 @@ export function ServiceDetail() {
     setBusy("batch-gen");
     setBatchResult(null);
     try {
+      const scenario_matrix = batchScenarioMatrixJson.trim()
+        ? (JSON.parse(batchScenarioMatrixJson) as Record<string, string[]>)
+        : null;
       const out = await api.generateCasesBatch(serviceId, {
         suite_name_prefix: batchPrefix.trim() || null,
         approve: batchApprove,
         continue_on_error: batchContinue,
         limit: batchLimit.trim() ? parseInt(batchLimit, 10) : null,
+        business_context: batchBusinessContext.trim() || null,
+        scenario_matrix,
+        scenario_max_combinations: batchScenarioMax.trim() ? parseInt(batchScenarioMax, 10) : 128,
       });
       setBatchResult(out);
       await load();
-    } catch {
+    } catch (e) {
+      if (e instanceof SyntaxError) {
+        notifyApiError("场景矩阵须为合法 JSON 对象。", "格式错误");
+      }
       /* 错误已由 api 层弹窗提示 */
     } finally {
       setBusy(null);
@@ -107,13 +136,48 @@ export function ServiceDetail() {
     }
   };
 
+  const toggleEndpointNotes = (row: api.EndpointRow) => {
+    setEndpointNotesOpen((m) => {
+      const next = !m[row.id];
+      if (next) {
+        setEndpointNotesDraft((d) => ({ ...d, [row.id]: row.test_design_notes ?? "" }));
+      }
+      return { ...m, [row.id]: next };
+    });
+  };
+
+  const saveEndpointNotes = async (endpointId: string) => {
+    setEndpointNotesSaving(endpointId);
+    try {
+      const text = (endpointNotesDraft[endpointId] ?? "").trim();
+      await api.patchEndpointNotes(endpointId, { test_design_notes: text || null });
+      await load();
+    } catch {
+      /* api 层已弹窗 */
+    } finally {
+      setEndpointNotesSaving(null);
+    }
+  };
+
   const genOne = async (endpointId: string) => {
     setEndpointGenUi((m) => ({ ...m, [endpointId]: "loading" }));
     try {
-      await api.generateCasesForEndpoint(endpointId, {});
+      const matrixText = resolveScenarioMatrixJsonText(endpointId);
+      const scenario_matrix = matrixText
+        ? (JSON.parse(matrixText) as Record<string, string[]>)
+        : null;
+      const genOut = await api.generateCasesForEndpoint(endpointId, {
+        business_context: batchBusinessContext.trim() || null,
+        scenario_matrix,
+        scenario_max_combinations: batchScenarioMax.trim() ? parseInt(batchScenarioMax, 10) : 128,
+      });
+      setEndpointPathCoverage((m) => ({ ...m, [endpointId]: genOut.path_coverage }));
       await load();
       setEndpointGenUi((m) => ({ ...m, [endpointId]: "done" }));
-    } catch {
+    } catch (e) {
+      if (e instanceof SyntaxError) {
+        notifyApiError("场景矩阵须为合法 JSON 对象。", "格式错误");
+      }
       setEndpointGenUi((m) => ({ ...m, [endpointId]: "idle" }));
     }
   };
@@ -189,6 +253,33 @@ export function ServiceDetail() {
             批量生成
           </button>
         </div>
+        <label style={{ marginTop: "0.75rem", display: "block" }}>
+          业务说明 business_context（可选，与 OpenAPI 一并传给 LLM；单行生成与批量生成共用）
+          <textarea
+            value={batchBusinessContext}
+            onChange={(e) => setBatchBusinessContext(e.target.value)}
+            placeholder="例如：订单状态 draft→paid→shipped；仅 paid 可取消；需先登录拿到 token…"
+            rows={5}
+            style={{ width: "100%", marginTop: "0.35rem" }}
+          />
+        </label>
+        <label style={{ marginTop: "0.75rem", display: "block" }}>
+          场景矩阵 scenario_matrix（可选，JSON 对象；后端自动展开路径组合）
+          <textarea
+            value={batchScenarioMatrixJson}
+            onChange={(e) => setBatchScenarioMatrixJson(e.target.value)}
+            placeholder={'{"推荐产品数":["0","1","多个"],"理财卡余额":["足够","不足"],"转账结果":["成功后购买","失败直接退出"]}'}
+            rows={5}
+            style={{ width: "100%", marginTop: "0.35rem" }}
+          />
+        </label>
+        <label style={{ marginTop: "0.75rem", display: "block", maxWidth: "280px" }}>
+          scenario_max_combinations
+          <input value={batchScenarioMax} onChange={(e) => setBatchScenarioMax(e.target.value)} />
+        </label>
+        <p className="muted" style={{ fontSize: "0.8rem", marginTop: "0.5rem", marginBottom: 0 }}>
+          批量返回中的 <span className="mono">path_coverages</span> 与 <span className="mono">suites</span> 顺序一一对应。
+        </p>
         {batchResult && (
           <div style={{ marginTop: "0.75rem" }}>
             <p>
@@ -238,6 +329,12 @@ export function ServiceDetail() {
 
       <div className="card">
         <h2>Endpoints</h2>
+        <p className="muted" style={{ fontSize: "0.85rem", marginTop: 0 }}>
+          「接口说明」保存为当前接口的测试设计补充说明（写入数据库），生成用例时以{" "}
+          <strong>★高优先级</strong> 注入大模型；「场景矩阵」若本行为空则沿用上方批量区的共享 JSON；共享{" "}
+          <span className="mono">scenario_max_combinations</span> 与{" "}
+          <span className="mono">business_context</span>。
+        </p>
         {endpoints.length === 0 ? (
           <p className="muted">暂无 endpoint，请先同步 Swagger。</p>
         ) : (
@@ -252,38 +349,130 @@ export function ServiceDetail() {
             </thead>
             <tbody>
               {endpoints.map((e) => (
-                <tr key={e.id}>
-                  <td>
-                    <span className={`badge ${e.method.toLowerCase()}`}>{e.method}</span>
-                  </td>
-                  <td className="mono">{e.path}</td>
-                  <td className="mono">{e.operation_id || "—"}</td>
-                  <td>
-                    <div className="row" style={{ gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
-                      <Link to={`/services/${serviceId}/endpoints/${e.id}`}>查看用例</Link>
-                      <span className="gen-case-actions">
-                        <button
-                          type="button"
-                          className="btn secondary"
-                          disabled={endpointGenUi[e.id] === "loading"}
-                          onClick={() => genOne(e.id)}
-                        >
-                          生成用例
-                        </button>
-                        {endpointGenUi[e.id] === "loading" && (
-                          <span className="gen-status" title="正在生成…" aria-live="polite" aria-label="正在生成用例">
-                            <span className="icon-spinner" />
-                          </span>
-                        )}
-                        {endpointGenUi[e.id] === "done" && (
-                          <span className="gen-status gen-status--done" title="生成完成" aria-label="生成完成">
-                            ✓
-                          </span>
-                        )}
-                      </span>
-                    </div>
-                  </td>
-                </tr>
+                <Fragment key={e.id}>
+                  <tr>
+                    <td>
+                      <span className={`badge ${e.method.toLowerCase()}`}>{e.method}</span>
+                    </td>
+                    <td className="mono">{e.path}</td>
+                    <td className="mono">{e.operation_id || "—"}</td>
+                    <td>
+                      <div className="row" style={{ gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+                        <Link to={`/services/${serviceId}/endpoints/${e.id}`}>查看用例</Link>
+                        <span className="gen-case-actions">
+                          <button
+                            type="button"
+                            className="btn secondary"
+                            aria-expanded={endpointNotesOpen[e.id] === true}
+                            onClick={() => toggleEndpointNotes(e)}
+                          >
+                            {endpointNotesOpen[e.id] ? "收起接口说明" : "接口说明"}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn secondary"
+                            aria-expanded={endpointMatrixOpen[e.id] === true}
+                            onClick={() =>
+                              setEndpointMatrixOpen((m) => ({ ...m, [e.id]: !m[e.id] }))
+                            }
+                          >
+                            {endpointMatrixOpen[e.id] ? "收起场景矩阵" : "场景矩阵"}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn secondary"
+                            disabled={endpointGenUi[e.id] === "loading"}
+                            onClick={() => genOne(e.id)}
+                          >
+                            生成用例
+                          </button>
+                          {endpointGenUi[e.id] === "loading" && (
+                            <span className="gen-status" title="正在生成…" aria-live="polite" aria-label="正在生成用例">
+                              <span className="icon-spinner" />
+                            </span>
+                          )}
+                          {endpointGenUi[e.id] === "done" && (
+                            <span className="gen-status gen-status--done" title="生成完成" aria-label="生成完成">
+                              ✓
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                    </td>
+                  </tr>
+                  {endpointNotesOpen[e.id] && (
+                    <tr className="endpoint-notes-row">
+                      <td colSpan={4} style={{ paddingTop: "0.35rem", borderTop: "none" }}>
+                        <label style={{ display: "block" }}>
+                          <span className="mono">test_design_notes</span>（★高优先级注入 LLM，限 16000 字）
+                          <textarea
+                            value={endpointNotesDraft[e.id] ?? ""}
+                            onChange={(ev) =>
+                              setEndpointNotesDraft((d) => ({ ...d, [e.id]: ev.target.value }))
+                            }
+                            placeholder="例如：本接口由 Agent 调用；需覆盖 token 过期、重复提交、下游超时；关键断言在响应 JSON 的 code 字段…"
+                            rows={6}
+                            style={{ width: "100%", marginTop: "0.35rem" }}
+                          />
+                        </label>
+                        <div className="row" style={{ marginTop: "0.5rem", gap: "0.5rem", alignItems: "center" }}>
+                          <button
+                            type="button"
+                            className="btn"
+                            disabled={endpointNotesSaving === e.id}
+                            onClick={() => saveEndpointNotes(e.id)}
+                          >
+                            {endpointNotesSaving === e.id ? "保存中…" : "保存到服务端"}
+                          </button>
+                          {e.test_design_notes ? (
+                            <span className="muted" style={{ fontSize: "0.8rem" }}>
+                              已保存 {e.test_design_notes.length} 字（刷新后见最新）
+                            </span>
+                          ) : null}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  {endpointMatrixOpen[e.id] && (
+                    <tr className="endpoint-matrix-row">
+                      <td colSpan={4} style={{ paddingTop: "0.35rem", borderTop: "none" }}>
+                        <label style={{ display: "block" }}>
+                          本接口 <span className="mono">scenario_matrix</span>（JSON 对象；留空则用批量区共享矩阵）
+                          <textarea
+                            value={endpointScenarioMatrixJson[e.id] ?? ""}
+                            onChange={(ev) =>
+                              setEndpointScenarioMatrixJson((m) => ({
+                                ...m,
+                                [e.id]: ev.target.value,
+                              }))
+                            }
+                            placeholder='{"维度A":["值1","值2"],"维度B":["x","y"]}'
+                            rows={5}
+                            style={{ width: "100%", marginTop: "0.35rem", fontFamily: "ui-monospace, monospace" }}
+                          />
+                        </label>
+                        {!endpointScenarioMatrixJson[e.id]?.trim() && batchScenarioMatrixJson.trim() ? (
+                          <p className="muted" style={{ fontSize: "0.8rem", margin: "0.35rem 0 0" }}>
+                            本行为空：点击「生成用例」时将使用上方批量区已填写的共享场景矩阵。
+                          </p>
+                        ) : null}
+                      </td>
+                    </tr>
+                  )}
+                  {endpointPathCoverage[e.id] && (
+                    <tr className="path-coverage-row">
+                      <td colSpan={4} style={{ paddingTop: 0, borderTop: "none" }}>
+                        <p className="muted" style={{ fontSize: "0.85rem", margin: "0.25rem 0 0.5rem" }}>
+                          路径覆盖报告（用例 name 是否包含 path-NNN）
+                          {endpointPathCoverage[e.id]!.enabled
+                            ? ` — ${endpointPathCoverage[e.id]!.covered_paths.length}/${endpointPathCoverage[e.id]!.expanded_paths_count}（ratio ${endpointPathCoverage[e.id]!.coverage_ratio}）`
+                            : " — 未使用场景矩阵"}
+                        </p>
+                        <JsonBlock data={endpointPathCoverage[e.id]} />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               ))}
             </tbody>
           </table>

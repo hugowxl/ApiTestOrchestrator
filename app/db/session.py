@@ -162,6 +162,46 @@ def _ensure_mock_data_table_reset_rows_json_column() -> None:
         return
 
 
+def _ensure_agent_target_new_columns() -> None:
+    """旧库的 agent_target / turn_result 表缺少新增字段时启动自愈。"""
+    new_cols: list[tuple[str, str, str]] = [
+        ("api_format", "VARCHAR(32)", "'openai_chat'"),
+        ("engine_agent_id", "VARCHAR(255)", "NULL"),
+        ("engine_agent_type", "VARCHAR(255)", "NULL"),
+        ("engine_base_url", "VARCHAR(2048)", "NULL"),
+        ("agent_description", "TEXT", "NULL"),
+        ("agent_tools", "TEXT", "NULL"),
+    ]
+    _add_missing_columns("agent_target", new_cols)
+
+    _add_missing_columns("turn_result", [
+        ("request_snapshot", "TEXT", "NULL"),
+    ])
+
+
+def _add_missing_columns(table: str, new_cols: list[tuple[str, str, str]]) -> None:
+    dialect = engine.dialect.name
+    with engine.begin() as conn:
+        if dialect == "sqlite":
+            rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+            existing = {row[1] for row in rows}
+            for col, col_type, default in new_cols:
+                if col not in existing:
+                    default_clause = f" DEFAULT {default}" if default != "NULL" else ""
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}{default_clause}"))
+                    logger.info("SQLite: 已添加列 %s.%s", table, col)
+        elif dialect in ("mysql", "mariadb"):
+            for col, col_type, default in new_cols:
+                r = conn.execute(text(
+                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t AND COLUMN_NAME = :c"
+                ), {"t": table, "c": col})
+                if int(r.scalar() or 0) == 0:
+                    default_clause = f" DEFAULT {default}" if default != "NULL" else " NULL"
+                    conn.execute(text(f"ALTER TABLE `{table}` ADD COLUMN `{col}` {col_type}{default_clause}"))
+                    logger.info("%s: 已添加列 %s.%s", dialect, table, col)
+
+
 def init_db() -> None:
     if _settings.database_url.startswith("sqlite"):
         db_path = _settings.database_url.replace("sqlite:///", "", 1)
@@ -171,6 +211,10 @@ def init_db() -> None:
     _ensure_mysql_longtext_openapi_columns()
     _ensure_endpoint_test_design_notes_column()
     _ensure_mock_data_table_reset_rows_json_column()
+    _ensure_agent_target_new_columns()
+    _add_missing_columns("conversation_scenario", [
+        ("active_mock_profile_id", "VARCHAR(36)", "NULL"),
+    ])
 
 
 def get_db() -> Generator[Session, None, None]:

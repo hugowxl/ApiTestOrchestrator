@@ -8,10 +8,12 @@ from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 
+from app.api.agent_test_routes import router as agent_test_router
 from app.api.mock_routes import mock_mapped_server_router
 from app.api.mock_routes import mock_server_router
 from app.api.mock_routes import router as mock_router
 from app.api.routes import router
+from app.services.workflow_mock_server import router as workflow_mock_router
 from app.api.schemas import ErrorBody
 from app.config import get_settings
 from app.db.session import init_db
@@ -36,6 +38,8 @@ async def lifespan(_: FastAPI):
     setup_file_logging(get_settings())
     apply_forced_log_levels(get_settings())
     init_db()
+    from app.services.workflow_mock_server import start_standalone_mock_server
+    start_standalone_mock_server()
     yield
 
 
@@ -158,8 +162,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 app.include_router(router, prefix="/api/v1")
 app.include_router(mock_router, prefix="/api/v1")
+app.include_router(agent_test_router, prefix="/api/v1")
 app.include_router(mock_server_router)
 app.include_router(mock_mapped_server_router)
+app.include_router(workflow_mock_router)
 
 
 @app.get("/health")

@@ -1,11 +1,16 @@
+from dataclasses import asdict
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.schemas import (
+    EndpointListItemOut,
+    EndpointNotesPatch,
     GenerateCasesBatchFailure,
     GenerateCasesBatchOut,
     GenerateCasesBatchRequest,
+    GenerateCasesOut,
     GenerateCasesRequest,
     ReportOut,
     RunSuiteRequest,
@@ -13,6 +18,7 @@ from app.api.schemas import (
     RunSuitesBatchRequest,
     RunSuitesBatchSkip,
     ServiceCreate,
+    ScenarioPathCoverageOut,
     ServiceOut,
     SuiteOut,
     SyncJobOut,
@@ -65,19 +71,25 @@ def list_endpoint_suites(endpoint_id: str, db: Session = Depends(get_db)):
     )
 
 
-@router.get("/services/{service_id}/endpoints", response_model=list[dict])
+@router.get("/services/{service_id}/endpoints", response_model=list[EndpointListItemOut])
 def list_endpoints(service_id: str, db: Session = Depends(get_db)):
+    if not db.get(TargetService, service_id):
+        raise HTTPException(404, detail={"code": ErrorCode.NOT_FOUND.value, "message": "服务不存在"})
     rows = db.execute(select(Endpoint).where(Endpoint.service_id == service_id)).scalars().all()
-    return [
-        {
-            "id": r.id,
-            "method": r.method,
-            "path": r.path,
-            "operation_id": r.operation_id,
-            "fingerprint": r.fingerprint,
-        }
-        for r in rows
-    ]
+    return list(rows)
+
+
+@router.patch("/endpoints/{endpoint_id}", response_model=EndpointListItemOut)
+def patch_endpoint_notes(endpoint_id: str, body: EndpointNotesPatch, db: Session = Depends(get_db)):
+    ep = db.get(Endpoint, endpoint_id)
+    if not ep:
+        raise HTTPException(404, detail={"code": ErrorCode.NOT_FOUND.value, "message": "endpoint 不存在"})
+    if body.test_design_notes is not None:
+        s = body.test_design_notes.strip()
+        ep.test_design_notes = s if s else None
+    db.commit()
+    db.refresh(ep)
+    return ep
 
 
 @router.get("/services/{service_id}/suites", response_model=list[SuiteOut])
@@ -124,7 +136,7 @@ def trigger_sync(service_id: str, body: SyncRequest, db: Session = Depends(get_d
     return job
 
 
-@router.post("/endpoints/{endpoint_id}/generate-cases", response_model=SuiteOut)
+@router.post("/endpoints/{endpoint_id}/generate-cases", response_model=GenerateCasesOut)
 def generate_cases(endpoint_id: str, body: GenerateCasesRequest, db: Session = Depends(get_db)):
     tok = trace_begin()
     try:
@@ -133,17 +145,23 @@ def generate_cases(endpoint_id: str, body: GenerateCasesRequest, db: Session = D
         designer = LLMTestDesigner()
         tlog("GC-03", "call generate_for_endpoint")
         try:
-            suite = designer.generate_for_endpoint(
+            suite, coverage = designer.generate_for_endpoint(
                 db,
                 endpoint_id,
                 suite_name=body.suite_name,
                 approve=body.approve,
+                business_context=body.business_context,
+                scenario_matrix=body.scenario_matrix,
+                scenario_max_combinations=body.scenario_max_combinations,
             )
         except AppError as e:
             tlog("GC-ERR", f"AppError code={e.code.value} msg={e.message!r}")
             raise http_exception_from_app_error(e) from e
         tlog("GC-99", f"route ok suite_id={suite.id}")
-        return suite
+        return GenerateCasesOut(
+            suite=SuiteOut.model_validate(suite),
+            path_coverage=ScenarioPathCoverageOut.model_validate(asdict(coverage)),
+        )
     finally:
         trace_end(tok)
 
@@ -178,6 +196,7 @@ def generate_cases_batch(
 
     designer = LLMTestDesigner()
     suites: list[TestSuite] = []
+    path_coverages: list[ScenarioPathCoverageOut] = []
     failures: list[GenerateCasesBatchFailure] = []
 
     for ep in eps:
@@ -185,10 +204,17 @@ def generate_cases_batch(
         if body.suite_name_prefix:
             suite_name = f"{body.suite_name_prefix}-{ep.method}-{ep.path}"[:500]
         try:
-            suite = designer.generate_for_endpoint(
-                db, ep.id, suite_name=suite_name, approve=body.approve
+            suite, coverage = designer.generate_for_endpoint(
+                db,
+                ep.id,
+                suite_name=suite_name,
+                approve=body.approve,
+                business_context=body.business_context,
+                scenario_matrix=body.scenario_matrix,
+                scenario_max_combinations=body.scenario_max_combinations,
             )
             suites.append(suite)
+            path_coverages.append(ScenarioPathCoverageOut.model_validate(asdict(coverage)))
         except AppError as e:
             failures.append(
                 GenerateCasesBatchFailure(
@@ -211,6 +237,7 @@ def generate_cases_batch(
         succeeded=len(suites),
         failed=len(failures),
         suites=suites,
+        path_coverages=path_coverages,
         failures=failures,
     )
 

@@ -19,6 +19,27 @@ class ServiceOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class EndpointListItemOut(BaseModel):
+    """服务下 endpoint 列表项（含可编辑的测试设计说明）。"""
+
+    id: str
+    method: str
+    path: str
+    operation_id: str | None
+    fingerprint: str
+    test_design_notes: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class EndpointNotesPatch(BaseModel):
+    test_design_notes: str | None = Field(
+        default=None,
+        max_length=16000,
+        description="当前接口的测试设计补充说明，生成用例时以高优先级注入 LLM；传 null 或空串可清空。",
+    )
+
+
 class SyncRequest(BaseModel):
     swagger_url: str | None = None
     fetch_headers: dict[str, str] | None = None
@@ -57,6 +78,24 @@ class SyncJobOut(BaseModel):
 class GenerateCasesRequest(BaseModel):
     suite_name: str | None = None
     approve: bool = False
+    business_context: str | None = Field(
+        default=None,
+        max_length=48000,
+        description="产品/领域业务说明（状态机、前置条件、错误分支等），与 OpenAPI 一并传给 LLM。",
+    )
+    scenario_matrix: dict[str, list[str]] | None = Field(
+        default=None,
+        description=(
+            "场景组合矩阵：key=场景变量名，value=可选值数组。后端会做笛卡尔积展开并要求 LLM 覆盖路径。"
+            '例如 {"推荐产品数":["0","1","3+"],"理财卡余额":["足够","不足"]}'
+        ),
+    )
+    scenario_max_combinations: int = Field(
+        default=128,
+        ge=1,
+        le=2000,
+        description="场景矩阵最大展开条数（超出会截断）。",
+    )
 
 
 class SuiteOut(BaseModel):
@@ -68,6 +107,25 @@ class SuiteOut(BaseModel):
     created_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ScenarioPathCoverageOut(BaseModel):
+    """场景矩阵 path-NNN 在用例 name 中的覆盖情况（生成接口返回）。"""
+
+    enabled: bool = False
+    expected_paths: list[str] = Field(default_factory=list)
+    covered_paths: list[str] = Field(default_factory=list)
+    missing_paths: list[str] = Field(default_factory=list)
+    total_cartesian_combinations: int = 0
+    expanded_paths_count: int = 0
+    truncated: bool = False
+    coverage_ratio: float = 0.0
+    path_labels: dict[str, str] = Field(default_factory=dict)
+
+
+class GenerateCasesOut(BaseModel):
+    suite: SuiteOut
+    path_coverage: ScenarioPathCoverageOut
 
 
 class TestCaseOut(BaseModel):
@@ -104,6 +162,21 @@ class GenerateCasesBatchRequest(BaseModel):
     approve: bool = False
     continue_on_error: bool = True
     limit: int | None = Field(default=None, ge=1, le=2000, description="最多处理多少个 endpoint，省略则全部")
+    business_context: str | None = Field(
+        default=None,
+        max_length=48000,
+        description="同上，批量时每个 endpoint 生成均附带该业务说明。",
+    )
+    scenario_matrix: dict[str, list[str]] | None = Field(
+        default=None,
+        description="同上，批量生成时每个 endpoint 共用该场景矩阵。",
+    )
+    scenario_max_combinations: int = Field(
+        default=128,
+        ge=1,
+        le=2000,
+        description="同上，场景矩阵最大展开条数。",
+    )
 
 
 class GenerateCasesBatchFailure(BaseModel):
@@ -119,6 +192,10 @@ class GenerateCasesBatchOut(BaseModel):
     succeeded: int
     failed: int
     suites: list[SuiteOut]
+    path_coverages: list[ScenarioPathCoverageOut] = Field(
+        default_factory=list,
+        description="与 suites 顺序一一对应（成功生成的套件）。",
+    )
     failures: list[GenerateCasesBatchFailure]
 
 

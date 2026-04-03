@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     executor_ca_bundle: str = ""
     executor_verify_ssl: bool = True
 
+    # 独立 Mock 工作流服务器
+    mock_server_port: int = 30001
+    mock_server_host: str = "127.0.0.1"
+
     def executor_tls_verify(self) -> bool | str:
         ca = (self.executor_ca_bundle or "").strip()
         if ca:
